@@ -1,0 +1,34 @@
+asr:
+  primary: auto_tinglish_whisper_telugu
+  model_variant: whisper_telugu_small_int8
+  supported:
+    - auto_tinglish_whisper_telugu
+    - sarvam_saaras_v4
+    - sarvam_saaras_v3
+    - whisper
+    - indic_conformer
+
+diarization:
+  primary: nemotron_3_diarization
+  supported:
+    - nemotron_3_diarization
+    - pyannote
+    - local_sortformer
+
+translation:
+  primary: sarvam
+  supported:
+    - sarvam
+    - llm
+    - nllb
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  format: wav
+  chunk_duration_sec: 1.0
+
+alignment:
+  overlap_threshold_sec: 0.15
+  ambiguity_delta_sec: 0.05
+  merge_turn_gap_sec: 0.45
