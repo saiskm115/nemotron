@@ -78,9 +78,13 @@ class OfflinePipeline:
         elif session.settings.asr_mode == "verbatim":
             asr_mode_val = ASRMode.VERBATIM
 
+        primary_lang = session.settings.primary_language
+        if not primary_lang or primary_lang.lower() in ["unknown", "auto", ""]:
+            primary_lang = "te-IN"
+
         asr_options = ASROptions(
             mode=asr_mode_val,
-            language_code=session.settings.primary_language,
+            language_code=primary_lang,
             with_timestamps=True,
             keyterms=session.settings.keyterms
         )

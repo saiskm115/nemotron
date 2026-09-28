@@ -15,7 +15,7 @@ async def upload_audio(
     file: UploadFile = File(...),
     title: str = Form("Uploaded Audio Session"),
     asr_mode: str = Form("codemix"),
-    primary_language: str = Form("unknown"),
+    primary_language: str = Form("te-IN"),
     target_language: str = Form("en-IN"),
     auto_translate: bool = Form(False)
 ):

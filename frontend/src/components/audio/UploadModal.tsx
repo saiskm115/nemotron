@@ -33,7 +33,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('Telugu English Executive Meeting');
   const [asrMode, setAsrMode] = useState<'codemix' | 'normal' | 'verbatim'>('codemix');
-  const [primaryLang, setPrimaryLang] = useState('unknown');
+  const [primaryLang, setPrimaryLang] = useState('te');
   const [targetLang, setTargetLang] = useState('en-IN');
   const [autoTranslate, setAutoTranslate] = useState(true);
 
@@ -443,7 +443,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
               <div className="flex justify-between items-center">
                 <label className="text-xs text-slate-300 font-medium">Primary Spoken Language:</label>
                 <span className="text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-                  {primaryLang === 'unknown' ? 'Auto-Detect + Fallback' : primaryLang.toUpperCase()}
+                  {primaryLang === 'te' ? 'TELUGU / TINGLISH' : (primaryLang === 'unknown' ? 'AUTO-DETECT' : primaryLang.toUpperCase())}
                 </span>
               </div>
               <select
@@ -451,9 +451,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
                 onChange={(e) => setPrimaryLang(e.target.value)}
                 className="bg-slate-950 p-2 rounded-lg border border-cyan-500/40 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
               >
-                <option value="unknown">Auto-Detect (English, Telugu, Hindi with Smart Fallback)</option>
+                <option value="te">Telugu / Tinglish (Code-mixed) [Recommended]</option>
+                <option value="unknown">Auto-Detect (Telugu, English, Hindi)</option>
                 <option value="en">English (Indian / US / UK)</option>
-                <option value="te">Telugu / Tinglish (Code-mixed)</option>
                 <option value="hi">Hindi / Hinglish</option>
               </select>
             </div>
