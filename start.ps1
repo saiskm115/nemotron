@@ -1,5 +1,5 @@
-# start.ps1 - Starts both Backend and Frontend for DiarizeStudio
-$ErrorActionPreference = "SilentlyContinue"
+# Determine project root
+$root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "       Starting DiarizeStudio Suite       " -ForegroundColor Cyan
@@ -14,11 +14,30 @@ if ($p5173) { Stop-Process -Id $p5173 -Force -ErrorAction SilentlyContinue }
 
 # 2. Launch Backend daemon
 Write-Host "[1/2] Starting FastAPI Backend on http://127.0.0.1:8000..." -ForegroundColor Green
-$backendProc = Start-Process -FilePath "py" -ArgumentList "-3.11", "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $PSScriptRoot -PassThru -WindowStyle Hidden
+$backendProc = Start-Process -FilePath "py" -ArgumentList "-3.11", "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000" -WorkingDirectory $root -PassThru -WindowStyle Hidden
+
+# Wait for backend health check (up to 10s)
+$healthy = $false
+for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 500
+    try {
+        $res = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/health" -Method Get -TimeoutSec 1
+        if ($res.status -eq "healthy") {
+            $healthy = $true
+            break
+        }
+    } catch {}
+}
+
+if ($healthy) {
+    Write-Host "  -> Backend is ready and healthy at http://127.0.0.1:8000" -ForegroundColor Green
+} else {
+    Write-Host "  -> WARNING: Backend startup taking longer than expected. Check uvicorn backend.main:app" -ForegroundColor Yellow
+}
 
 # 3. Launch Frontend in Vite dev server
 Write-Host "[2/2] Starting Vite Frontend on http://127.0.0.1:5173..." -ForegroundColor Green
-Set-Location -Path "$PSScriptRoot\frontend"
+Set-Location -Path "$root\frontend"
 
 Write-Host ""
 Write-Host "Application is live:" -ForegroundColor Yellow
