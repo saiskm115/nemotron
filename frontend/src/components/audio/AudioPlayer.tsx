@@ -31,6 +31,17 @@ export const AudioPlayer: React.FC = () => {
     setSelectedTurnId
   } = useSessionStore();
 
+  // Capture real duration from HTML audio element
+  const handleLoadedMetadata = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    const realDuration = el.duration;
+    if (realDuration && isFinite(realDuration) && realDuration > 0) {
+      // Update store duration from actual audio element (fixes 00:00.000 / 00:00.000)
+      useSessionStore.setState({ duration: realDuration });
+    }
+  };
+
   const audioSrc = session?.id ? `/api/audio/${session.id}/stream` : '';
   const turns = session?.turns || [];
 
@@ -144,6 +155,8 @@ export const AudioPlayer: React.FC = () => {
         src={audioSrc}
         onTimeUpdate={handleTimeUpdate}
         onEnded={handleEnded}
+        onLoadedMetadata={handleLoadedMetadata}
+        onDurationChange={handleLoadedMetadata}
         preload="metadata"
       />
 

@@ -1,5 +1,6 @@
 import React from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import {
   MousePointer,
   Hand,
@@ -40,18 +41,71 @@ export const EditorToolbar: React.FC = () => {
 
     if (tool === 'marker') {
       addMarker(currentTime, 'Marker');
-    } else if (tool === 'split' && selectedTurnId) {
+      toast.info(`Marker placed at ${currentTime.toFixed(2)}s`, 'Timeline Marker');
+    } else if (tool === 'split') {
+      if (!selectedTurnId) {
+        toast.warning('Please select a segment on the timeline or transcript to split.', 'Split Segment');
+        return;
+      }
       const t = turns.find(item => item.id === selectedTurnId);
-      if (t && currentTime > t.start && currentTime < t.end) {
-        const words = t.text.split(' ');
-        const mid = Math.max(1, Math.floor(words.length / 2));
-        splitTurn(t.id, currentTime, words.slice(0, mid).join(' '), words.slice(mid).join(' '));
+      if (!t) {
+        toast.error('Selected segment not found.', 'Split Segment');
+        return;
       }
-    } else if (tool === 'merge' && selectedTurnId) {
+      if (currentTime <= t.start || currentTime >= t.end) {
+        toast.warning(
+          `Playhead (${currentTime.toFixed(2)}s) must be inside segment range (${t.start.toFixed(2)}s – ${t.end.toFixed(2)}s) to split.`,
+          'Split Boundary'
+        );
+        return;
+      }
+      toast.confirm(
+        `Split segment at playhead position ${currentTime.toFixed(2)}s into two turns?`,
+        {
+          title: 'Split Segment?',
+          confirmLabel: 'Split Segment',
+          cancelLabel: 'Cancel',
+          confirmVariant: 'primary',
+          onConfirm: async () => {
+            const words = t.text.split(' ');
+            const mid = Math.max(1, Math.floor(words.length / 2));
+            await splitTurn(t.id, currentTime, words.slice(0, mid).join(' '), words.slice(mid).join(' '));
+          },
+          onCancel: () => {
+            toast.info('Split operation cancelled', 'Cancelled');
+          }
+        }
+      );
+    } else if (tool === 'merge') {
+      if (!selectedTurnId) {
+        toast.warning('Please select a segment on the timeline or transcript to merge with the next segment.', 'Merge Segments');
+        return;
+      }
       const idx = turns.findIndex(item => item.id === selectedTurnId);
-      if (idx >= 0 && idx < turns.length - 1) {
-        mergeTurns(turns[idx].id, turns[idx + 1].id);
+      if (idx < 0) {
+        toast.error('Selected segment not found.', 'Merge Segments');
+        return;
       }
+      if (idx >= turns.length - 1) {
+        toast.warning('Selected segment is the final turn and cannot be merged forward.', 'Merge Segments');
+        return;
+      }
+      const nextTurn = turns[idx + 1];
+      toast.confirm(
+        `Merge turn #${idx + 1} with turn #${idx + 2} into a single contiguous segment?`,
+        {
+          title: 'Merge Segments?',
+          confirmLabel: 'Merge Segments',
+          cancelLabel: 'Cancel',
+          confirmVariant: 'primary',
+          onConfirm: async () => {
+            await mergeTurns(turns[idx].id, nextTurn.id);
+          },
+          onCancel: () => {
+            toast.info('Merge operation cancelled', 'Cancelled');
+          }
+        }
+      );
     }
   };
 

@@ -73,7 +73,8 @@ class AlignedUnit:
         is_final: bool = True,
         is_overlap: bool = False,
         overlap_speakers: Optional[List[str]] = None,
-        source_token: Optional[ASRToken] = None
+        source_token: Optional[ASRToken] = None,
+        is_speech_only: bool = False
     ):
         self.text = text
         self.start = start
@@ -84,6 +85,7 @@ class AlignedUnit:
         self.is_overlap = is_overlap
         self.overlap_speakers = overlap_speakers or []
         self.source_token = source_token
+        self.is_speech_only = is_speech_only
 
 class AlignmentEngine:
     def __init__(self, overlap_threshold: float = 0.05, merge_gap: float = 0.45):
@@ -109,8 +111,6 @@ class AlignmentEngine:
         elif asr_result.chunks:
             for c in asr_result.chunks:
                 units_to_align.append((c.text, c.start, c.end, c.confidence, c.is_final, None))
-        else:
-            return []
 
         diar_segments = diarization_result.segments
         aligned_units: List[AlignedUnit] = []
@@ -155,7 +155,6 @@ class AlignmentEngine:
                 )
             else:
                 # No direct temporal overlap found (pause or gap in diarization)
-                # Find closest diarization segment
                 closest_seg = None
                 min_dist = float("inf")
                 for d in diar_segments:
@@ -164,7 +163,6 @@ class AlignmentEngine:
                         min_dist = dist
                         closest_seg = d
 
-                # If closest segment is within 0.8s, assign to that speaker, else keep last speaker
                 assigned_speaker = closest_seg.speaker_id if (closest_seg and min_dist < 0.8) else last_assigned_speaker
                 last_assigned_speaker = assigned_speaker
 
@@ -182,4 +180,29 @@ class AlignmentEngine:
                     )
                 )
 
+        # CRITICAL GUARANTEE: Ensure every Nemotron Diarization segment is represented.
+        # If any diarization segment has NO overlapping ASR units, add a speech_only
+        # AlignedUnit so that Nemotron's detected speech is represented in the timeline
+        # without polluting the transcript with placeholder text.
+        for d in diar_segments:
+            covered = any(
+                u.speaker_id == d.speaker_id and max(0.0, min(u.end, d.end) - max(u.start, d.start)) > 0.1
+                for u in aligned_units
+            )
+            if not covered:
+                aligned_units.append(
+                    AlignedUnit(
+                        text="",  # No transcript text — timeline-only entry
+                        start=d.start,
+                        end=d.end,
+                        speaker_id=d.speaker_id,
+                        confidence=d.confidence,
+                        is_final=True,
+                        is_overlap=False,
+                        overlap_speakers=[],
+                        is_speech_only=True  # Flag: Nemotron detected speech, ASR has no coverage
+                    )
+                )
+
+        aligned_units.sort(key=lambda u: (u.start, u.end))
         return aligned_units

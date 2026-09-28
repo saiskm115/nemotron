@@ -25,6 +25,7 @@ class Turn(BaseModel):
     original_start: Optional[float] = None
     original_end: Optional[float] = None
     translation_status: Literal["not_requested", "pending", "complete", "failed"] = "not_requested"
+    speech_only: bool = False  # True when Nemotron detected speech but ASR has no coverage
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -34,6 +35,12 @@ class TurnUpdate(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
     translated_text: Optional[str] = None
+    retranscribe: Optional[bool] = False
+
+class TurnRetranscribeRequest(BaseModel):
+    start: float
+    end: float
+    speaker_id: Optional[str] = None
 
 class TurnSplitRequest(BaseModel):
     turn_id: str

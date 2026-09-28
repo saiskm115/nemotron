@@ -1,47 +1,29 @@
 import React, { useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import {
-  Users,
-  Sliders,
-  Radio,
-  Clock,
-  Hash,
-  Edit2,
-  Check,
-  GitMerge,
-  AlertTriangle,
-  Languages,
-  Sparkles,
-  ChevronRight,
-  ShieldCheck,
-  FileAudio
+  Users, Sliders, Clock, Edit2, Check, X,
+  GitMerge, AlertTriangle, Languages, RotateCcw,
+  Hash, Mic2, Activity, ChevronRight, Trash2,
+  PieChart, BarChart2
 } from 'lucide-react';
 
 export const RightSidebar: React.FC = () => {
   const {
-    session,
-    selectedTurnId,
-    isSidebarOpen,
-    sidebarTab,
-    setSidebarTab,
-    updateSpeaker,
-    mergeSpeakers,
-    updateTurn,
-    currentTime,
-    setCurrentTime
+    session, selectedTurnId, isSidebarOpen, sidebarTab, setSidebarTab,
+    updateSpeaker, mergeSpeakers, updateTurn, translateTurn, setCurrentTime, resetTurn
   } = useSessionStore();
 
   const [editingSpkId, setEditingSpkId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editColor, setEditColor] = useState('');
-
-  // Speaker merging state
   const [isMerging, setIsMerging] = useState(false);
   const [sourceId, setSourceId] = useState('');
   const [targetId, setTargetId] = useState('');
 
-  const speakers = session?.speakers || [];
-  const turns = session?.turns || [];
+  const speakers = session?.speakers ?? [];
+  const turns = session?.turns ?? [];
+  const totalDuration = session?.duration ?? 0;
   const selectedTurn = turns.find(t => t.id === selectedTurnId);
   const selectedSpeaker = speakers.find(s => s.id === selectedTurn?.speaker_id);
 
@@ -52,108 +34,152 @@ export const RightSidebar: React.FC = () => {
     setEditName(spk.display_name);
     setEditColor(spk.color);
   };
-
   const handleSaveEdit = async (spkId: string) => {
-    await updateSpeaker(spkId, {
-      display_name: editName,
-      color: editColor
-    });
+    if (!editName.trim()) {
+      toast.warning('Speaker display name cannot be empty.', 'Speaker Edit');
+      return;
+    }
+    await updateSpeaker(spkId, { display_name: editName.trim(), color: editColor });
     setEditingSpkId(null);
   };
-
   const handlePerformMerge = async () => {
-    if (!sourceId || !targetId || sourceId === targetId) return;
-    await mergeSpeakers(sourceId, targetId);
-    setIsMerging(false);
-    setSourceId('');
-    setTargetId('');
+    if (!sourceId || !targetId) {
+      toast.warning('Please select both a source and target speaker.', 'Merge Speakers');
+      return;
+    }
+    if (sourceId === targetId) {
+      toast.warning('Cannot merge a speaker into itself.', 'Merge Speakers');
+      return;
+    }
+    const srcSpk = speakers.find(s => s.id === sourceId)?.display_name || sourceId;
+    const tgtSpk = speakers.find(s => s.id === targetId)?.display_name || targetId;
+    toast.confirm(
+      `Merge all speech turns from "${srcSpk}" into "${tgtSpk}"?`,
+      {
+        title: 'Merge Speakers?',
+        confirmLabel: 'Merge Speakers',
+        cancelLabel: 'Cancel',
+        confirmVariant: 'primary',
+        onConfirm: async () => {
+          await mergeSpeakers(sourceId, targetId);
+          setIsMerging(false);
+          setSourceId('');
+          setTargetId('');
+        },
+        onCancel: () => {
+          toast.info('Speaker merge cancelled', 'Cancelled');
+        }
+      }
+    );
   };
 
-  const formatSecs = (s: number) => {
-    const mins = Math.floor(s / 60);
-    const secs = Math.floor(s % 60);
-    return `${mins}m ${secs}s`;
+  const fmt = (s: number) => {
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
   };
+  const fmtTC = (s: number) => {
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    const cs = Math.floor((s % 1) * 100);
+    return `${m.toString().padStart(2,'0')}:${sec.toString().padStart(2,'0')}.${cs.toString().padStart(2,'0')}`;
+  };
+
+  // Speaker stats
+  const totalSpeakingTime = speakers.reduce((a, s) => a + (s.total_speaking_time ?? 0), 0);
+
+  const COLORS = ['#38bdf8','#f43f5e','#10b981','#a855f7','#f59e0b','#06b6d4','#ec4899','#84cc16'];
 
   return (
     <aside className="inspector-sidebar">
-      {/* Sidebar Tabs */}
-      <div className="flex items-center border-b border-white/10 bg-slate-950 px-2 py-1 gap-1 text-xs">
-        <button
-          onClick={() => setSidebarTab('speakers')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-            sidebarTab === 'speakers'
-              ? 'bg-slate-800 text-cyan-300 font-semibold shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Users size={13} />
-          <span>Speakers ({speakers.length})</span>
-        </button>
-
-        <button
-          onClick={() => setSidebarTab('properties')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-            sidebarTab === 'properties'
-              ? 'bg-slate-800 text-cyan-300 font-semibold shadow-sm'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Sliders size={13} />
-          <span>Inspector</span>
-        </button>
+      {/* ── Tabs ────────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center',
+        borderBottom: '1px solid rgba(255,255,255,0.07)',
+        background: '#090d17', padding: '0 6px', gap: 2, flexShrink: 0
+      }}>
+        {[
+          { key: 'speakers', icon: <Users size={12} />, label: `Speakers (${speakers.length})` },
+          { key: 'properties', icon: <Sliders size={12} />, label: 'Inspector' },
+        ].map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setSidebarTab(tab.key as any)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '8px 10px',
+              fontSize: 11.5, fontWeight: 500,
+              color: sidebarTab === tab.key ? '#38bdf8' : 'rgba(148,163,184,0.7)',
+              background: 'none', border: 'none', cursor: 'pointer',
+              borderBottom: sidebarTab === tab.key ? '2px solid #38bdf8' : '2px solid transparent',
+              marginBottom: -1, transition: 'color 0.13s'
+            }}
+          >
+            {tab.icon}
+            <span>{tab.label}</span>
+          </button>
+        ))}
       </div>
 
-      {/* Tab 1: Speakers Management */}
+      {/* ── Tab: Speakers ─────────────────────────────────────────────── */}
       {sidebarTab === 'speakers' && (
-        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
-          <div className="flex items-center justify-between pb-1 border-b border-white/5">
-            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+        <div style={{ flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+          {/* Merge panel trigger */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 600 }}>
               Diarized Voices
             </span>
             <button
-              onClick={() => setIsMerging(!isMerging)}
-              className="btn btn-secondary !py-0.5 text-[11px] text-cyan-300 hover:text-white"
+              onClick={() => setIsMerging(p => !p)}
+              className="btn btn-secondary !py-0.5"
+              style={{ fontSize: 11, gap: 4, color: '#7dd3fc' }}
             >
-              <GitMerge size={12} />
+              <GitMerge size={11} />
               <span>Merge</span>
             </button>
           </div>
 
-          {/* Merge Dialog */}
+          {/* Merge UI */}
           {isMerging && (
-            <div className="p-2.5 bg-slate-950 rounded-lg border border-cyan-500/30 flex flex-col gap-2 animate-fade-in text-xs">
-              <span className="text-[11px] text-slate-300 font-medium">Merge source into target:</span>
-              <div className="flex flex-col gap-1.5">
-                <select
-                  value={sourceId}
-                  onChange={(e) => setSourceId(e.target.value)}
-                  className="bg-slate-900 border border-white/10 p-1 rounded text-slate-200 text-xs"
-                >
-                  <option value="">Source speaker...</option>
-                  {speakers.map(s => (
-                    <option key={s.id} value={s.id}>{s.display_name} ({s.id})</option>
-                  ))}
-                </select>
-                <select
-                  value={targetId}
-                  onChange={(e) => setTargetId(e.target.value)}
-                  className="bg-slate-900 border border-white/10 p-1 rounded text-slate-200 text-xs"
-                >
-                  <option value="">Target speaker...</option>
-                  {speakers.map(s => (
-                    <option key={s.id} value={s.id}>{s.display_name} ({s.id})</option>
-                  ))}
-                </select>
+            <div
+              className="animate-fade-in"
+              style={{
+                padding: 12, background: 'rgba(56,189,248,0.05)',
+                border: '1px solid rgba(56,189,248,0.2)', borderRadius: 10,
+                display: 'flex', flexDirection: 'column', gap: 8
+              }}
+            >
+              <span style={{ fontSize: 11, color: 'rgba(241,245,249,0.8)', fontWeight: 500 }}>
+                Merge speaker identity:
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {[
+                  { label: 'Source (will be merged away)', val: sourceId, set: setSourceId },
+                  { label: 'Target (will absorb source)',  val: targetId, set: setTargetId },
+                ].map(f => (
+                  <div key={f.label} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{f.label}</span>
+                    <select
+                      value={f.val}
+                      onChange={e => f.set(e.target.value)}
+                      style={{ padding: '4px 8px', fontSize: 11.5, borderRadius: 6 }}
+                    >
+                      <option value="">Select speaker…</option>
+                      {speakers.map(s => (
+                        <option key={s.id} value={s.id}>{s.display_name} ({s.id})</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
               </div>
-              <div className="flex justify-end gap-1.5 mt-1">
-                <button onClick={() => setIsMerging(false)} className="btn btn-secondary !py-0.5 text-[11px]">
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                <button onClick={() => setIsMerging(false)} className="btn btn-secondary !py-0.5" style={{ fontSize: 11 }}>
                   Cancel
                 </button>
                 <button
                   disabled={!sourceId || !targetId || sourceId === targetId}
                   onClick={handlePerformMerge}
-                  className="btn btn-primary !py-0.5 text-[11px] disabled:opacity-50"
+                  className="btn btn-primary !py-0.5"
+                  style={{ fontSize: 11 }}
                 >
                   Confirm Merge
                 </button>
@@ -161,103 +187,217 @@ export const RightSidebar: React.FC = () => {
             </div>
           )}
 
-          {/* Speaker Cards */}
-          <div className="flex flex-col gap-2">
-            {speakers.map((spk) => {
-              const isEdit = editingSpkId === spk.id;
-              return (
-                <div
-                  key={spk.id}
-                  className="p-2.5 rounded-lg bg-slate-900/60 border border-white/5 flex flex-col gap-2"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="w-3 h-3 rounded-full shrink-0 shadow-sm"
-                        style={{ backgroundColor: spk.color }}
-                      />
-                      {isEdit ? (
-                        <input
-                          type="text"
-                          value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          className="bg-slate-950 px-1.5 py-0.5 rounded text-xs text-white border border-cyan-400 focus:outline-none"
-                        />
-                      ) : (
-                        <span className="font-semibold text-xs text-slate-200">{spk.display_name}</span>
-                      )}
+          {/* Speaker cards */}
+          {speakers.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '24px 12px', color: 'var(--text-muted)', fontSize: 12 }}>
+              <Mic2 size={28} style={{ margin: '0 auto 8px', opacity: 0.3 }} />
+              <div>No speakers detected</div>
+              <div style={{ fontSize: 10.5, marginTop: 4, color: 'var(--text-dim)' }}>Upload audio to begin diarization</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {speakers.map((spk) => {
+                const isEdit = editingSpkId === spk.id;
+                const pct = totalSpeakingTime > 0
+                  ? Math.round((spk.total_speaking_time / totalSpeakingTime) * 100)
+                  : 0;
+                const spkTurns = turns.filter(t => t.speaker_id === spk.id);
+
+                return (
+                  <div
+                    key={spk.id}
+                    style={{
+                      background: 'rgba(9,13,23,0.8)',
+                      border: `1px solid ${spk.color}28`,
+                      borderRadius: 10, overflow: 'hidden',
+                      transition: 'border-color 0.13s'
+                    }}
+                  >
+                    {/* Card header */}
+                    <div style={{
+                      padding: '9px 11px',
+                      background: `linear-gradient(90deg, ${spk.color}12 0%, transparent 100%)`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, overflow: 'hidden', flex: 1 }}>
+                        {isEdit ? (
+                          <input
+                            type="color"
+                            value={editColor}
+                            onChange={e => setEditColor(e.target.value)}
+                            style={{ width: 22, height: 22, padding: 0, border: 'none', borderRadius: 4, cursor: 'pointer', background: 'transparent', flexShrink: 0 }}
+                          />
+                        ) : (
+                          <span style={{
+                            width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+                            backgroundColor: spk.color, boxShadow: `0 0 7px ${spk.color}88`
+                          }} />
+                        )}
+
+                        {isEdit ? (
+                          <input
+                            type="text"
+                            value={editName}
+                            onChange={e => setEditName(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && handleSaveEdit(spk.id)}
+                            style={{
+                              flex: 1, padding: '3px 8px', fontSize: 12, borderRadius: 5,
+                              border: '1px solid rgba(56,189,248,0.5)', background: '#0a0e18',
+                              color: '#f1f5f9'
+                            }}
+                            autoFocus
+                          />
+                        ) : (
+                          <span style={{
+                            fontWeight: 600, fontSize: 12.5,
+                            color: 'rgba(241,245,249,0.9)',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+                          }}>
+                            {spk.display_name}
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
+                        {isEdit ? (
+                          <>
+                            <button onClick={() => handleSaveEdit(spk.id)}
+                              style={{ padding: 4, borderRadius: 4, background: 'rgba(16,185,129,0.15)', border: 'none', cursor: 'pointer', color: '#34d399', display: 'flex' }}>
+                              <Check size={12} />
+                            </button>
+                            <button onClick={() => setEditingSpkId(null)}
+                              style={{ padding: 4, borderRadius: 4, background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(148,163,184,0.6)', display: 'flex' }}>
+                              <X size={12} />
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => handleStartEdit(spk)}
+                            style={{ padding: 4, borderRadius: 4, background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(148,163,184,0.5)', display: 'flex' }}
+                            title="Rename / recolor"
+                          >
+                            <Edit2 size={11} />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    {isEdit ? (
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="color"
-                          value={editColor}
-                          onChange={(e) => setEditColor(e.target.value)}
-                          className="w-5 h-5 rounded cursor-pointer bg-transparent border-0"
-                        />
-                        <button
-                          onClick={() => handleSaveEdit(spk.id)}
-                          className="p-1 text-emerald-400 hover:bg-emerald-500/20 rounded"
-                        >
-                          <Check size={12} />
-                        </button>
+                    {/* Stats bar */}
+                    <div style={{ padding: '6px 11px 8px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                      {/* Speaking time bar */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{fmt(spk.total_speaking_time ?? 0)} spoken</span>
+                        <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: spk.color }}>{pct}%</span>
                       </div>
-                    ) : (
-                      <button
-                        onClick={() => handleStartEdit(spk)}
-                        className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
-                        title="Rename or Change Color"
-                      >
-                        <Edit2 size={11} />
-                      </button>
+                      <div className="progress-bar-track">
+                        <div className="progress-bar-fill" style={{ width: `${pct}%`, background: spk.color }} />
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 2 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+                          <Hash size={10} style={{ color: spk.color, opacity: 0.7 }} />
+                          <span>{spk.turn_count ?? spkTurns.length} turns</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                          <Clock size={10} style={{ opacity: 0.7 }} />
+                          <span>{spk.id}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Color presets (show only in edit mode) */}
+                    {isEdit && (
+                      <div style={{ padding: '0 11px 9px', display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 2 }}>Presets:</span>
+                        {COLORS.map(c => (
+                          <button
+                            key={c}
+                            onClick={() => setEditColor(c)}
+                            style={{
+                              width: 14, height: 14, borderRadius: '50%',
+                              background: c, border: editColor === c ? '2px solid #fff' : '2px solid transparent',
+                              cursor: 'pointer', flexShrink: 0
+                            }}
+                          />
+                        ))}
+                      </div>
                     )}
                   </div>
+                );
+              })}
+            </div>
+          )}
 
-                  {/* Speaker Metrics */}
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono pt-1 border-t border-white/5">
-                    <span>{formatSecs(spk.total_speaking_time)} spoken</span>
-                    <span>{spk.turn_count} turns</span>
+          {/* Overall stats */}
+          {speakers.length > 0 && (
+            <div style={{
+              marginTop: 4, padding: 10,
+              background: 'rgba(56,189,248,0.04)', borderRadius: 10,
+              border: '1px solid rgba(56,189,248,0.1)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                <BarChart2 size={12} style={{ color: '#38bdf8' }} />
+                <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(241,245,249,0.7)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Session Overview
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                {[
+                  { label: 'Total turns', val: turns.length },
+                  { label: 'Speakers', val: speakers.length },
+                  { label: 'Duration', val: fmt(totalDuration) },
+                  { label: 'Talking time', val: fmt(totalSpeakingTime) },
+                ].map(s => (
+                  <div key={s.label} style={{
+                    padding: '6px 8px', background: 'rgba(0,0,0,0.3)', borderRadius: 7,
+                    border: '1px solid rgba(255,255,255,0.05)'
+                  }}>
+                    <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginBottom: 2 }}>{s.label}</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'rgba(241,245,249,0.85)', fontFamily: 'var(--font-mono)' }}>{s.val}</div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Tab 2: Properties Inspector */}
+      {/* ── Tab: Inspector ──────────────────────────────────────────────── */}
       {sidebarTab === 'properties' && (
-        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+        <div style={{ flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           {selectedTurn ? (
-            <div className="flex flex-col gap-3 text-xs">
-              <div className="flex items-center justify-between pb-1 border-b border-white/5">
-                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                  Selected Turn Properties
+            <>
+              {/* Turn ID */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 600 }}>
+                  Turn Properties
                 </span>
-                <span className="font-mono text-[10px] text-cyan-400 bg-slate-950 px-1.5 py-0.5 rounded border border-white/5">
-                  {selectedTurn.id}
+                <span style={{
+                  fontSize: 9.5, fontFamily: 'var(--font-mono)', color: 'rgba(56,189,248,0.7)',
+                  background: 'rgba(56,189,248,0.07)', padding: '1px 6px', borderRadius: 4,
+                  border: '1px solid rgba(56,189,248,0.15)'
+                }}>
+                  {selectedTurn.id.slice(0, 12)}…
                 </span>
               </div>
 
-              {/* Speaker Attribution */}
-              <div className="p-2.5 rounded-lg bg-slate-900/60 border border-white/5 flex flex-col gap-1.5">
-                <span className="text-[10px] text-slate-500 font-semibold uppercase">Speaker</span>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: selectedSpeaker?.color || '#38bdf8' }}
-                    />
-                    <span className="font-medium text-slate-200">
-                      {selectedSpeaker?.display_name || selectedTurn.speaker_id}
+              {/* Speaker attribution */}
+              <div style={{ background: '#0c1020', borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+                <div style={{ padding: '8px 11px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Speaker</span>
+                </div>
+                <div style={{ padding: '9px 11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: selectedSpeaker?.color ?? '#38bdf8', flexShrink: 0, boxShadow: `0 0 5px ${selectedSpeaker?.color ?? '#38bdf8'}66` }} />
+                    <span style={{ fontWeight: 600, fontSize: 12.5, color: 'rgba(241,245,249,0.9)' }}>
+                      {selectedSpeaker?.display_name ?? selectedTurn.speaker_id}
                     </span>
                   </div>
-
                   <select
                     value={selectedTurn.speaker_id}
-                    onChange={(e) => updateTurn(selectedTurn.id, { speaker_id: e.target.value })}
-                    className="bg-slate-950 text-xs text-slate-300 border border-white/10 rounded px-2 py-0.5"
+                    onChange={e => updateTurn(selectedTurn.id, { speaker_id: e.target.value })}
+                    style={{ padding: '3px 6px', fontSize: 11, borderRadius: 6 }}
+                    title="Reassign speaker"
                   >
                     {speakers.map(s => (
                       <option key={s.id} value={s.id}>{s.display_name}</option>
@@ -267,57 +407,175 @@ export const RightSidebar: React.FC = () => {
               </div>
 
               {/* Timestamps */}
-              <div className="grid grid-cols-2 gap-2 font-mono text-[11px]">
-                <div className="p-2 rounded-lg bg-slate-950 border border-white/5 flex flex-col gap-0.5">
-                  <span className="text-[10px] text-slate-500 font-sans">Start Timestamp</span>
-                  <span className="text-cyan-400 font-semibold">{selectedTurn.start.toFixed(2)}s</span>
-                </div>
-                <div className="p-2 rounded-lg bg-slate-950 border border-white/5 flex flex-col gap-0.5">
-                  <span className="text-[10px] text-slate-500 font-sans">End Timestamp</span>
-                  <span className="text-cyan-400 font-semibold">{selectedTurn.end.toFixed(2)}s</span>
-                </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
+                {[
+                  { label: 'Start', val: fmtTC(selectedTurn.start), action: () => setCurrentTime(selectedTurn.start) },
+                  { label: 'End',   val: fmtTC(selectedTurn.end),   action: () => setCurrentTime(selectedTurn.end) },
+                ].map(f => (
+                  <button
+                    key={f.label}
+                    onClick={f.action}
+                    style={{
+                      padding: '7px 9px', background: '#080c16',
+                      border: '1px solid rgba(255,255,255,0.07)',
+                      borderRadius: 8, textAlign: 'left', cursor: 'pointer',
+                      transition: 'border-color 0.13s'
+                    }}
+                    title={`Seek to ${f.label}`}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = 'rgba(56,189,248,0.35)')}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)')}
+                  >
+                    <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginBottom: 3 }}>{f.label} Timestamp</div>
+                    <div style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)', color: '#38bdf8', fontWeight: 600 }}>{f.val}</div>
+                  </button>
+                ))}
               </div>
 
-              {/* Status & Overlap */}
-              <div className="p-2.5 rounded-lg bg-slate-900/60 border border-white/5 flex flex-col gap-2">
-                <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400">Duration:</span>
-                  <span className="font-mono text-slate-200">{(selectedTurn.end - selectedTurn.start).toFixed(2)}s</span>
-                </div>
-
-                <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400">Confidence:</span>
-                  <span className="font-mono text-emerald-400">
-                    {selectedTurn.confidence ? `${Math.round(selectedTurn.confidence * 100)}%` : '95% (High)'}
-                  </span>
-                </div>
-
-                <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400">Status:</span>
-                  <span className="font-mono text-slate-300 uppercase">{selectedTurn.status}</span>
-                </div>
-
-                {selectedTurn.overlap && (
-                  <div className="p-2 rounded bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-center gap-1.5 text-[11px]">
-                    <AlertTriangle size={13} className="shrink-0" />
-                    <span>Overlapping speech / barge-in flagged</span>
+              {/* Stats row */}
+              <div style={{
+                background: '#080c16', borderRadius: 9, border: '1px solid rgba(255,255,255,0.06)',
+                padding: '8px 11px', display: 'flex', flexDirection: 'column', gap: 6
+              }}>
+                {[
+                  { label: 'Duration', val: `${(selectedTurn.end - selectedTurn.start).toFixed(2)}s` },
+                  {
+                    label: 'Confidence',
+                    val: selectedTurn.confidence
+                      ? `${Math.round(selectedTurn.confidence * 100)}%`
+                      : '—',
+                    color: selectedTurn.confidence
+                      ? (selectedTurn.confidence >= 0.9 ? '#34d399' : selectedTurn.confidence >= 0.75 ? '#fcd34d' : '#f87171')
+                      : undefined
+                  },
+                  { label: 'Status', val: selectedTurn.status?.toUpperCase() ?? '—' },
+                  { label: 'Source', val: selectedTurn.source ?? 'model' },
+                ].map(r => (
+                  <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{r.label}</span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', color: r.color ?? 'rgba(241,245,249,0.8)',
+                      fontWeight: 600
+                    }}>{r.val}</span>
                   </div>
-                )}
+                ))}
+
+                {/* Duration progress bar */}
+                <div>
+                  <div className="progress-bar-track" style={{ marginTop: 2 }}>
+                    <div className="progress-bar-fill" style={{
+                      width: `${Math.min(100, ((selectedTurn.end - selectedTurn.start) / (totalDuration || 1)) * 100 * 10)}%`
+                    }} />
+                  </div>
+                </div>
               </div>
+
+              {/* Overlap warning */}
+              {selectedTurn.overlap && (
+                <div style={{
+                  padding: '9px 11px', background: 'rgba(244,63,94,0.08)',
+                  border: '1px solid rgba(244,63,94,0.25)', borderRadius: 9,
+                  display: 'flex', alignItems: 'flex-start', gap: 7
+                }}>
+                  <AlertTriangle size={14} style={{ color: '#fb7185', flexShrink: 0, marginTop: 1 }} />
+                  <div>
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: '#fda4af', marginBottom: 2 }}>
+                      Overlapping / Barge-in Speech
+                    </div>
+                    <div style={{ fontSize: 10.5, color: 'rgba(253,164,175,0.7)' }}>
+                      Multiple speakers were active simultaneously during this turn.
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Translation */}
               {selectedTurn.translated_text && (
-                <div className="p-2.5 rounded-lg bg-slate-900/60 border border-white/5 flex flex-col gap-1">
-                  <span className="text-[10px] text-slate-500 font-semibold uppercase">English Translation</span>
-                  <p className="text-xs text-sky-200/90 italic">"{selectedTurn.translated_text}"</p>
+                <div style={{
+                  padding: '9px 11px', background: 'rgba(56,189,248,0.05)',
+                  border: '1px solid rgba(56,189,248,0.13)', borderRadius: 9
+                }}>
+                  <div style={{ fontSize: 9.5, color: 'rgba(56,189,248,0.6)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Translation
+                  </div>
+                  <p style={{ fontSize: 12.5, color: '#7dd3fc', fontStyle: 'italic', lineHeight: 1.55 }}>
+                    "{selectedTurn.translated_text}"
+                  </p>
                 </div>
               )}
-            </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 2 }}>
+                <button
+                  onClick={() => {
+                    toast.confirm(
+                      'Translate this speech turn into English using Sarvam Neural Translation?',
+                      {
+                        title: 'Translate Turn?',
+                        confirmLabel: 'Translate',
+                        cancelLabel: 'Cancel',
+                        confirmVariant: 'primary',
+                        onConfirm: async () => {
+                          await translateTurn(selectedTurn.id);
+                        },
+                        onCancel: () => {
+                          toast.info('Translation cancelled', 'Cancelled');
+                        }
+                      }
+                    );
+                  }}
+                  className="btn btn-secondary"
+                  style={{ fontSize: 11.5, justifyContent: 'flex-start', gap: 7 }}
+                >
+                  <Languages size={12} style={{ color: '#38bdf8' }} />
+                  Translate this turn
+                </button>
+                {selectedTurn.source === 'user_edit' && (
+                  <button
+                    onClick={() => {
+                      toast.confirm(
+                        'Revert manual edits and restore original model transcript for this segment?',
+                        {
+                          title: 'Reset Segment?',
+                          confirmLabel: 'Revert',
+                          cancelLabel: 'Keep Edits',
+                          confirmVariant: 'warning',
+                          onConfirm: async () => {
+                            await resetTurn(selectedTurn.id);
+                          },
+                          onCancel: () => {
+                            toast.info('Revert cancelled', 'Cancelled');
+                          }
+                        }
+                      );
+                    }}
+                    className="btn btn-secondary"
+                    style={{ fontSize: 11.5, justifyContent: 'flex-start', gap: 7 }}
+                  >
+                    <RotateCcw size={12} style={{ color: '#f59e0b' }} />
+                    Reset to model output
+                  </button>
+                )}
+              </div>
+            </>
           ) : (
-            <div className="flex flex-col items-center justify-center p-8 text-center text-slate-500 gap-2">
-              <Sliders size={24} className="text-slate-700" />
-              <span className="text-xs">No turn or timeline segment selected.</span>
-              <span className="text-[10px] text-slate-600">Click a speaker block on the timeline or a transcript row to inspect details.</span>
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', padding: '40px 16px', textAlign: 'center', gap: 10
+            }}>
+              <div style={{
+                width: 44, height: 44, borderRadius: 12,
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center'
+              }}>
+                <Sliders size={22} style={{ color: 'rgba(148,163,184,0.3)' }} />
+              </div>
+              <div style={{ fontSize: 12.5, fontWeight: 500, color: 'rgba(148,163,184,0.5)' }}>
+                Nothing selected
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(100,116,139,0.6)', lineHeight: 1.55 }}>
+                Click a segment on the timeline or a row in the transcript to inspect its properties.
+              </div>
             </div>
           )}
         </div>

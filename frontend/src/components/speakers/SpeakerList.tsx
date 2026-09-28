@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import { Users, GitMerge, Clock, Hash, Edit2, Check } from 'lucide-react';
 
 export const SpeakerList: React.FC = () => {
@@ -22,15 +23,26 @@ export const SpeakerList: React.FC = () => {
   };
 
   const handleSaveEdit = async (spkId: string) => {
+    if (!editName.trim()) {
+      toast.warning('Speaker display name cannot be empty.', 'Speaker Edit');
+      return;
+    }
     await updateSpeaker(spkId, {
-      display_name: editName,
+      display_name: editName.trim(),
       color: editColor
     });
     setEditingSpkId(null);
   };
 
   const handlePerformMerge = async () => {
-    if (!sourceId || !targetId || sourceId === targetId) return;
+    if (!sourceId || !targetId) {
+      toast.warning('Please select both a source and target speaker.', 'Merge Speakers');
+      return;
+    }
+    if (sourceId === targetId) {
+      toast.warning('Cannot merge a speaker into itself.', 'Merge Speakers');
+      return;
+    }
     await mergeSpeakers(sourceId, targetId);
     setIsMerging(false);
     setSourceId('');

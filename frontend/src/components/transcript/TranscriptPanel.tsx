@@ -55,8 +55,19 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({ onOpenUpload }
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedTurnId, turns]);
 
-  // Filter turns by search query
-  const filteredTurns = turns.filter(turn => {
+  // Separate transcribed turns from speech-only timeline entries:
+  // - speech_only: new sessions, properly flagged by backend
+  // - legacy: old sessions where "[Spoken Audio]" was inserted as placeholder text
+  const LEGACY_PLACEHOLDER = '[Spoken Audio]';
+  const transcribedTurns = turns.filter(t =>
+    !t.speech_only && t.text.trim() !== LEGACY_PLACEHOLDER && t.text.trim() !== ''
+  );
+  const speechOnlyCount = turns.filter(t =>
+    t.speech_only || t.text.trim() === LEGACY_PLACEHOLDER || t.text.trim() === ''
+  ).length;
+
+  // Filter transcribed turns by search query
+  const filteredTurns = transcribedTurns.filter(turn => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     const textMatch = turn.text.toLowerCase().includes(q);
@@ -68,6 +79,21 @@ export const TranscriptPanel: React.FC<TranscriptPanelProps> = ({ onOpenUpload }
 
   return (
     <div className="transcript-viewport">
+      {/* Speech-only segment info badge — Nemotron detected activity but ASR has no coverage */}
+      {speechOnlyCount > 0 && (
+        <div
+          className="flex items-center gap-2 px-3 py-2 mb-2 rounded-lg text-xs text-slate-400 bg-slate-900/60 border border-white/5"
+          title="These segments were detected by Nemotron diarization but have no ASR transcription. They are shown in the timeline track only."
+        >
+          <span className="w-2 h-2 rounded-full bg-amber-500/70 flex-shrink-0" />
+          <span>
+            <span className="font-semibold text-amber-400/90">{speechOnlyCount}</span>
+            {' '}timeline-only {speechOnlyCount === 1 ? 'segment' : 'segments'} detected by Nemotron with no ASR coverage
+            {' '}— visible in the diarization track above.
+          </span>
+        </div>
+      )}
+
       {filteredTurns.length > 0 ? (
         filteredTurns.map((turn, idx) => (
           <TranscriptTurn

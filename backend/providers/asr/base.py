@@ -25,6 +25,16 @@ class ASRProvider(ABC):
         """Transcribes complete audio input offline."""
         pass
 
+    async def transcribe_interval(
+        self,
+        audio_file_path: str,
+        start_time: float,
+        end_time: float,
+        options: ASROptions = None
+    ) -> ASRResult:
+        """Transcribes a specific temporal segment [start_time, end_time] of an audio file."""
+        return await self.transcribe_file(AudioInput(file_path=audio_file_path), options)
+
     @abstractmethod
     async def start_stream(self, options: ASROptions) -> ASRStream:
         """Starts real-time live streaming ASR session."""

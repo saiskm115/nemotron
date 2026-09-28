@@ -24,11 +24,21 @@ async def upload_audio(
         raise HTTPException(status_code=400, detail="Missing filename")
     
     ext = Path(file.filename).suffix.lower()
-    valid_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
+    valid_exts = {
+        # Mobile & Call recording formats
+        ".aac", ".m4a", ".mp4",
+        ".amr", ".3gp", ".3gpp",
+        ".opus", ".ogg", ".oga",
+        # Telephony, PBX & studio formats
+        ".wav", ".mp3", ".flac", ".wma",
+        # Web & Apple formats
+        ".webm", ".caf", ".aiff", ".aif"
+    }
     if ext not in valid_exts:
+        supported_list = "Call recordings (.aac, .m4a, .amr, .3gp, .opus), Standard audio (.wav, .mp3, .ogg, .flac, .wma, .webm, .caf, .aiff)"
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported audio format '{ext}'. Supported formats: {', '.join(valid_exts)}"
+            detail=f"Unsupported audio format '{ext}'. Supported formats: {supported_list}"
         )
 
     # 1. Create session

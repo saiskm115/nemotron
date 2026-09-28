@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import { BookMarked, Plus, X, UploadCloud, Tag } from 'lucide-react';
 
 interface VocabularyModalProps {
@@ -18,10 +19,12 @@ export const VocabularyModal: React.FC<VocabularyModalProps> = ({ isOpen, onClos
   ];
 
   const handleAdd = () => {
-    if (newTerm.trim()) {
-      addKeyterm(newTerm.trim());
-      setNewTerm('');
+    if (!newTerm.trim()) {
+      toast.warning('Please enter a keyterm before adding.', 'Vocabulary');
+      return;
     }
+    addKeyterm(newTerm.trim());
+    setNewTerm('');
   };
 
   const handleCsvImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -29,9 +32,21 @@ export const VocabularyModal: React.FC<VocabularyModalProps> = ({ isOpen, onClos
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      const terms = text.split(/[,\n\r]+/).map(t => t.trim()).filter(Boolean);
-      terms.forEach(t => addKeyterm(t));
+      try {
+        const text = event.target?.result as string;
+        const terms = text.split(/[,\n\r]+/).map(t => t.trim()).filter(Boolean);
+        if (terms.length === 0) {
+          toast.warning('No keyterms detected in the selected file.', 'Import Vocabulary');
+          return;
+        }
+        terms.forEach(t => addKeyterm(t));
+        toast.success(`Imported ${terms.length} keyterms from ${file.name}`, 'Vocabulary Imported');
+      } catch (err: any) {
+        toast.error('Failed to parse vocabulary file.', 'Import Error');
+      }
+    };
+    reader.onerror = () => {
+      toast.error('Could not read the selected file.', 'File Error');
     };
     reader.readAsText(file);
   };
@@ -80,7 +95,23 @@ export const VocabularyModal: React.FC<VocabularyModalProps> = ({ isOpen, onClos
               <Tag size={10} className="text-cyan-400" />
               <span>{term}</span>
               <button
-                onClick={() => removeKeyterm(term)}
+                onClick={() => {
+                  toast.confirm(
+                    `Remove keyterm "${term}" from domain vocabulary?`,
+                    {
+                      title: 'Remove Keyterm?',
+                      confirmLabel: 'Remove',
+                      cancelLabel: 'Keep',
+                      confirmVariant: 'danger',
+                      onConfirm: () => {
+                        removeKeyterm(term);
+                      },
+                      onCancel: () => {
+                        toast.info(`Keyterm "${term}" kept`, 'Cancelled');
+                      }
+                    }
+                  );
+                }}
                 className="text-slate-500 hover:text-rose-400 ml-0.5"
               >
                 <X size={11} />

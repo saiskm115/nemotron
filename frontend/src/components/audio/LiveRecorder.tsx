@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import { Mic, Square, Radio, AlertCircle } from 'lucide-react';
 
 export const LiveRecorder: React.FC = () => {
@@ -21,6 +22,7 @@ export const LiveRecorder: React.FC = () => {
 
       ws.onopen = () => {
         setIsRecordingLive(true);
+        toast.success('Live microphone streaming started.', 'Live Mic Active');
         // Start streaming audio
         const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
         audioContextRef.current = audioCtx;
@@ -70,13 +72,14 @@ export const LiveRecorder: React.FC = () => {
 
       ws.onerror = (err) => {
         console.error('WS error:', err);
+        toast.error('WebSocket live audio connection failed.', 'Live Mic Error');
       };
 
       ws.onclose = () => {
         setIsRecordingLive(false);
       };
     } catch (err: any) {
-      alert(`Could not access microphone: ${err.message}`);
+      toast.error(`Could not access microphone: ${err.message}`, 'Microphone Error');
     }
   };
 
@@ -92,6 +95,7 @@ export const LiveRecorder: React.FC = () => {
       audioContextRef.current.close();
     }
     setIsRecordingLive(false);
+    toast.info('Live stream recording stopped.', 'Live Mic');
   };
 
   return (

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { api } from '../../services/api';
+import { toast } from '../../stores/toastStore';
 import { Download, FileText, Code, FileSpreadsheet, X, Check } from 'lucide-react';
 
 interface ExportMenuProps {
@@ -22,14 +23,45 @@ export const ExportMenu: React.FC<ExportMenuProps> = ({ isOpen, onClose }) => {
     { id: 'docx', label: 'Word Document', ext: '.docx', desc: 'Formatted Microsoft Word meeting transcript', icon: FileSpreadsheet }
   ] as const;
 
-  const handleDownload = (format: 'srt' | 'vtt' | 'txt' | 'json' | 'docx') => {
-    const url = api.getExportUrl(session.id, format, includeTranslation);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${session.title}.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = async (format: 'srt' | 'vtt' | 'txt' | 'json' | 'docx') => {
+    if (!session) {
+      toast.error('No active session available to export.', 'Export Error');
+      return;
+    }
+    const formatObj = exportFormats.find(f => f.id === format);
+    toast.confirm(
+      `Generate and download ${formatObj?.label || format.toUpperCase()} (${formatObj?.ext || format})?`,
+      {
+        title: 'Export File?',
+        confirmLabel: 'Download',
+        cancelLabel: 'Cancel',
+        confirmVariant: 'primary',
+        onConfirm: async () => {
+          try {
+            const url = api.getExportUrl(session.id, format, includeTranslation);
+            const res = await fetch(url);
+            if (!res.ok) {
+              throw new Error(`Server returned error: ${res.status} ${res.statusText}`);
+            }
+            const blob = await res.blob();
+            const blobUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = `${session.title || 'transcript'}.${format}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(blobUrl);
+            toast.success(`${format.toUpperCase()} export downloaded successfully!`, 'Export Completed');
+          } catch (err: any) {
+            toast.error(err.message || 'Failed to download export file', 'Export Failed');
+          }
+        },
+        onCancel: () => {
+          toast.info('Export cancelled', 'Cancelled');
+        }
+      }
+    );
   };
 
   React.useEffect(() => {

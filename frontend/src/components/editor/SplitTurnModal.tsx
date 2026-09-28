@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Turn } from '../../types';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import { Scissors, X, Check, Clock } from 'lucide-react';
 
 interface SplitTurnModalProps {
@@ -23,7 +24,10 @@ export const SplitTurnModal: React.FC<SplitTurnModalProps> = ({ turn, isOpen, on
   const [afterText, setAfterText] = useState(words.slice(halfIdx).join(' '));
 
   const handleConfirmSplit = async () => {
-    if (!beforeText.trim() || !afterText.trim()) return;
+    if (!beforeText.trim() || !afterText.trim()) {
+      toast.warning('Both split segments must contain text.', 'Split Segment');
+      return;
+    }
     await splitTurn(turn.id, splitTime, beforeText.trim(), afterText.trim());
     onClose();
   };

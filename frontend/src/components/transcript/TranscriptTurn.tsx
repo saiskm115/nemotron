@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Turn } from '../../types';
 import { useSessionStore } from '../../stores/sessionStore';
+import { toast } from '../../stores/toastStore';
 import {
   Check,
   X,
@@ -64,11 +65,17 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
   const allSpeakers = session?.speakers || [];
 
   const handleSaveEdit = async () => {
-    if (editText.trim() !== turn.text || editSpeakerId !== turn.speaker_id) {
+    const trimmed = editText.trim();
+    if (!trimmed) {
+      toast.warning('Segment text cannot be empty.', 'Segment Edit');
+      return;
+    }
+    if (trimmed !== turn.text || editSpeakerId !== turn.speaker_id) {
       await updateTurn(turn.id, {
-        text: editText.trim(),
+        text: trimmed,
         speaker_id: editSpeakerId
       });
+      toast.success('Segment text updated', 'Segment Saved');
     }
     setIsEditing(false);
   };
@@ -113,6 +120,83 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
         </span>
       );
     });
+  };
+
+  const handleDeleteTurn = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    toast.confirm(
+      `Delete speech segment [${formatTime(turn.start)} – ${formatTime(turn.end)}] "${turn.text.slice(0, 35)}..."?`,
+      {
+        title: 'Delete Segment?',
+        confirmLabel: 'Delete Segment',
+        cancelLabel: 'Keep',
+        confirmVariant: 'danger',
+        onConfirm: async () => {
+          await deleteTurn(turn.id);
+        },
+        onCancel: () => {
+          toast.info('Deletion cancelled', 'Cancelled');
+        }
+      }
+    );
+  };
+
+  const handleResetTurn = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    toast.confirm(
+      'Revert manual edits and restore original model transcription for this segment?',
+      {
+        title: 'Revert Segment?',
+        confirmLabel: 'Revert',
+        cancelLabel: 'Keep Edits',
+        confirmVariant: 'warning',
+        onConfirm: async () => {
+          await resetTurn(turn.id);
+        },
+        onCancel: () => {
+          toast.info('Revert cancelled', 'Cancelled');
+        }
+      }
+    );
+  };
+
+  const handleMergeNext = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!nextTurnId) return;
+    toast.confirm(
+      'Merge this turn with the subsequent turn into a single speaker segment?',
+      {
+        title: 'Merge with Next Turn?',
+        confirmLabel: 'Merge Turns',
+        cancelLabel: 'Cancel',
+        confirmVariant: 'primary',
+        onConfirm: async () => {
+          await mergeTurns(turn.id, nextTurnId);
+        },
+        onCancel: () => {
+          toast.info('Merge cancelled', 'Cancelled');
+        }
+      }
+    );
+  };
+
+  const handleTranslateTurn = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    toast.confirm(
+      'Translate segment into English using Sarvam Neural Translation?',
+      {
+        title: 'Translate Segment?',
+        confirmLabel: 'Translate',
+        cancelLabel: 'Cancel',
+        confirmVariant: 'primary',
+        onConfirm: async () => {
+          await translateTurn(turn.id);
+        },
+        onCancel: () => {
+          toast.info('Translation cancelled', 'Cancelled');
+        }
+      }
+    );
   };
 
   return (
@@ -171,7 +255,7 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
               )}
               {nextTurnId && (
                 <button
-                  onClick={(e) => { e.stopPropagation(); mergeTurns(turn.id, nextTurnId); }}
+                  onClick={handleMergeNext}
                   className="p-1 text-slate-400 hover:text-cyan-400 rounded hover:bg-slate-800"
                   title="Merge with Next (M)"
                 >
@@ -179,7 +263,7 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
                 </button>
               )}
               <button
-                onClick={(e) => { e.stopPropagation(); translateTurn(turn.id); }}
+                onClick={handleTranslateTurn}
                 className="p-1 text-slate-400 hover:text-cyan-400 rounded hover:bg-slate-800"
                 title="Translate Turn"
               >
@@ -187,7 +271,7 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
               </button>
               {turn.source === 'user_edit' && (
                 <button
-                  onClick={(e) => { e.stopPropagation(); resetTurn(turn.id); }}
+                  onClick={handleResetTurn}
                   className="p-1 text-amber-400/80 hover:text-amber-300 rounded hover:bg-slate-800"
                   title="Reset to Raw Model Output"
                 >
@@ -195,7 +279,7 @@ export const TranscriptTurn: React.FC<TranscriptTurnProps> = ({
                 </button>
               )}
               <button
-                onClick={(e) => { e.stopPropagation(); deleteTurn(turn.id); }}
+                onClick={handleDeleteTurn}
                 className="p-1 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-800"
                 title="Delete Turn"
               >

@@ -22,6 +22,9 @@ export interface Turn {
   original_start?: number;
   original_end?: number;
   translation_status?: "not_requested" | "pending" | "complete" | "failed";
+  /** True when Nemotron detected speaker activity but ASR has no transcript coverage.
+   *  These are timeline-only entries \u2014 shown in the diarization track but hidden from transcript. */
+  speech_only?: boolean;
   created_at: string;
   updated_at: string;
 }

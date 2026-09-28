@@ -1,11 +1,12 @@
 import copy
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from ..models.session import Session, SessionCreate, SessionUpdate, EditCommand
 from ..models.speaker import Speaker, SpeakerUpdate
-from ..models.turn import Turn, TurnUpdate, TurnSplitRequest, TurnMergeRequest
+from ..models.turn import Turn, TurnUpdate, TurnSplitRequest, TurnMergeRequest, LanguageSegment
 from ..pipeline.alignment import parse_language_segments
 from .edit_store import EditHistoryManager
 from .audio_store import audio_store
@@ -53,6 +54,18 @@ class SessionStore:
         return None
 
     def list_sessions(self) -> List[Session]:
+        # Discover sessions persisted on disk that aren't in memory yet
+        if audio_store.base_path.exists():
+            for p in audio_store.base_path.iterdir():
+                if p.is_dir() and p.name.startswith("sess_") and p.name not in self._sessions:
+                    s_file = p / "session.json"
+                    if s_file.exists():
+                        try:
+                            with open(s_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            self._sessions[p.name] = Session(**data)
+                        except Exception:
+                            pass
         return list(self._sessions.values())
 
     def update_session(self, session_id: str, update: SessionUpdate) -> Optional[Session]:
@@ -107,6 +120,54 @@ class SessionStore:
 
                 after_state = t.model_dump()
                 self.get_history(session_id).record_edit("turn_update", before_state, after_state)
+                self._recalculate_speaker_stats(session)
+                self.persist(session_id)
+                return t
+        return None
+
+    def update_turn_retranscription(
+        self,
+        session_id: str,
+        turn_id: str,
+        start: float,
+        end: float,
+        text: str,
+        confidence: float = 0.95,
+        language_segments: Optional[List[LanguageSegment]] = None,
+        translated_text: Optional[str] = None,
+        speaker_id: Optional[str] = None
+    ) -> Optional[Turn]:
+        session = self.get_session(session_id)
+        if not session:
+            return None
+
+        for t in session.turns:
+            if t.id == turn_id:
+                before_state = t.model_dump()
+                t.start = round(start, 3)
+                t.end = round(end, 3)
+                t.text = text
+                t.confidence = confidence
+                if language_segments is not None:
+                    t.language_segments = language_segments
+                else:
+                    segs, _ = parse_language_segments(text)
+                    t.language_segments = segs
+
+                if speaker_id is not None:
+                    t.speaker_id = speaker_id
+
+                if translated_text is not None:
+                    t.translated_text = translated_text
+                    t.translation_status = "complete"
+
+                t.status = "edited"
+                t.source = "user_edit"
+                t.speech_only = False
+                t.updated_at = datetime.utcnow().isoformat()
+
+                after_state = t.model_dump()
+                self.get_history(session_id).record_edit("turn_retranscribe", before_state, after_state)
                 self._recalculate_speaker_stats(session)
                 self.persist(session_id)
                 return t

@@ -93,7 +93,10 @@ class OfflinePipeline:
         align_latency = time.time() - t0_align
 
         # 5. Build turns and speakers
-        turns, speakers = self.turn_builder.build_turns(aligned_units, session.speakers)
+        turns, speakers = self.turn_builder.build_turns(aligned_units, session.speakers, diar_result.segments)
+        for t in turns:
+            t.start = max(0.0, round(t.start, 3))
+            t.end = min(round(max(t.start + 0.05, t.end), 3), round(session.duration, 3))
         session.turns = turns
         session.speakers = speakers
 
@@ -102,6 +105,9 @@ class OfflinePipeline:
         if session.settings.auto_translate:
             t0_trans = time.time()
             for turn in session.turns:
+                # Skip speech-only turns — no ASR text to translate
+                if turn.speech_only or not turn.text.strip():
+                    continue
                 try:
                     req = TranslationRequest(
                         text=turn.text,

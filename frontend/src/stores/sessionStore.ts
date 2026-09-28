@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Session, Turn, Speaker, SessionSettings } from '../types';
 import { api } from '../services/api';
+import { toast } from './toastStore';
 
 interface SessionState {
   // Primary session state
@@ -31,10 +32,18 @@ interface SessionState {
   translitMode: 'script' | 'roman' | 'codemix';
   displayMode: 'original' | 'translation' | 'both';
 
+  // Workspace & timeline layout state (Section 1-10 of ui.md)
+  timelineMode: 'normal' | 'expanded' | 'focus';
+  timelineHeight: number;
+
   // Live recording state
   isRecordingLive: boolean;
 
   // Actions
+  setTimelineMode: (mode: 'normal' | 'expanded' | 'focus') => void;
+  toggleTimelineFocus: () => void;
+  toggleTimelineExpand: () => void;
+  setTimelineHeight: (height: number) => void;
   setSession: (session: Session) => void;
   loadSession: (sessionId: string) => Promise<void>;
   setCurrentTime: (time: number) => void;
@@ -59,6 +68,8 @@ interface SessionState {
   setIsRecordingLive: (isRecording: boolean) => void;
 
   // Session mutations
+  retranscribingTurnId: string | null;
+  retranscribeTurn: (turnId: string, start: number, end: number) => Promise<void>;
   updateTurn: (turnId: string, updates: Partial<Turn>) => Promise<void>;
   splitTurn: (turnId: string, timestamp: number, before: string, after: string) => Promise<void>;
   mergeTurns: (t1: string, t2: string) => Promise<void>;
@@ -76,6 +87,20 @@ interface SessionState {
   updateSettings: (settings: Partial<SessionSettings>) => Promise<void>;
 }
 
+const getStoredTimelineHeight = (): number => {
+  if (typeof window !== 'undefined') {
+    try {
+      const saved = localStorage.getItem('diarizestudio.timelineHeight');
+      if (saved) {
+        const val = parseInt(saved, 10);
+        if (!isNaN(val) && val >= 250) return val;
+      }
+      return Math.max(320, Math.floor(window.innerHeight * 0.48));
+    } catch (e) {}
+  }
+  return 380;
+};
+
 export const useSessionStore = create<SessionState>((set, get) => ({
   session: null,
   isLoading: false,
@@ -86,6 +111,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   isPlaying: false,
   playbackRate: 1.0,
 
+  // Workspace & timeline layout
+  timelineMode: 'normal',
+  timelineHeight: getStoredTimelineHeight(),
+
   zoomLevel: 60, // 60px per second default
   selectedTurnId: null,
   selectedSpeakerId: null,
@@ -93,15 +122,32 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   activeTab: 'transcript',
   activeTool: 'select',
   isSidebarOpen: true,
-  sidebarTab: 'speakers',
+  sidebarTab: 'speakers' as const,
   volume: 1.0,
   isMuted: false,
   isLooping: false,
   saveStatus: 'saved',
   markers: [],
-  translitMode: 'script',
-  displayMode: 'both',
+  translitMode: 'script' as const,
+  displayMode: 'both' as const,
   isRecordingLive: false,
+  retranscribingTurnId: null,
+
+  setTimelineMode: (mode) => set({ timelineMode: mode }),
+  toggleTimelineFocus: () => set(state => ({
+    timelineMode: state.timelineMode === 'focus' ? 'normal' : 'focus'
+  })),
+  toggleTimelineExpand: () => set(state => ({
+    timelineMode: state.timelineMode === 'expanded' ? 'normal' : 'expanded'
+  })),
+  setTimelineHeight: (height) => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('diarizestudio.timelineHeight', height.toString());
+      } catch (e) {}
+    }
+    set({ timelineHeight: height });
+  },
 
   setSession: (session) => set({
     session,
@@ -115,7 +161,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const session = await api.getSession(sessionId);
       set({ session, duration: session.duration || 0, isLoading: false });
     } catch (e: any) {
-      set({ error: e.message || 'Failed to load session', isLoading: false });
+      const msg = e.message || 'Failed to load session';
+      set({ error: msg, isLoading: false });
+      toast.error(msg, 'Load Session');
     }
   },
 
@@ -152,7 +200,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   // Turn mutations
   updateTurn: async (turnId: string, updates: Partial<Turn>) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session found to edit.', 'Edit Segment');
+      return;
+    }
+    const previousTurns = sess.turns;
     // 1. Optimistic local update for instantaneous 60fps UX
     set((state) => {
       if (!state.session) return state;
@@ -169,36 +221,86 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         return { session: { ...state.session, turns: newTurns } };
       });
     } catch (e: any) {
-      set({ error: e.message });
+      // Revert optimistic update
+      set((state) => ({
+        session: state.session ? { ...state.session, turns: previousTurns } : null,
+        error: e.message
+      }));
+      toast.error(e.message || 'Failed to update segment', 'Edit Error');
+    }
+  },
+
+  retranscribeTurn: async (turnId: string, start: number, end: number) => {
+    const sess = get().session;
+    if (!sess) return;
+    const previousTurns = sess.turns;
+    set({ retranscribingTurnId: turnId });
+    // Optimistic local update
+    set((state) => {
+      if (!state.session) return state;
+      const newTurns = state.session.turns.map(t =>
+        t.id === turnId ? { ...t, start, end, status: 'edited' as const, source: 'user_edit' as const } : t
+      );
+      return { session: { ...state.session, turns: newTurns } };
+    });
+
+    try {
+      const updatedTurn = await api.retranscribeTurn(sess.id, turnId, start, end);
+      set((state) => {
+        if (!state.session) return state;
+        const newTurns = state.session.turns.map(t => t.id === turnId ? updatedTurn : t);
+        return { session: { ...state.session, turns: newTurns }, retranscribingTurnId: null };
+      });
+      const previewText = updatedTurn.text.length > 40 ? updatedTurn.text.slice(0, 40) + '...' : updatedTurn.text;
+      toast.success(`Re-transcribed: "${previewText}"`, 'Section Updated');
+    } catch (e: any) {
+      set((state) => ({
+        session: state.session ? { ...state.session, turns: previousTurns } : null,
+        retranscribingTurnId: null,
+        error: e.message
+      }));
+      toast.error(e.message || 'Failed to retranscribe segment', 'Retranscription Error');
     }
   },
 
   splitTurn: async (turnId: string, timestamp: number, before: string, after: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to perform split.', 'Split Action');
+      return;
+    }
     try {
-      const res = await api.splitTurn(sess.id, turnId, timestamp, before, after);
-      // Reload session to sync state perfectly
+      await api.splitTurn(sess.id, turnId, timestamp, before, after);
       await get().loadSession(sess.id);
+      toast.success('Segment split successfully', 'Split Segment');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to split segment', 'Split Error');
     }
   },
 
   mergeTurns: async (t1: string, t2: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to perform merge.', 'Merge Action');
+      return;
+    }
     try {
       await api.mergeTurns(sess.id, t1, t2);
       await get().loadSession(sess.id);
+      toast.success('Segments merged successfully', 'Merge Segments');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to merge segments', 'Merge Error');
     }
   },
 
   deleteTurn: async (turnId: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to delete segment.', 'Delete Action');
+      return;
+    }
     try {
       await api.deleteTurn(sess.id, turnId);
       set((state) => {
@@ -211,14 +313,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           selectedTurnId: state.selectedTurnId === turnId ? null : state.selectedTurnId
         };
       });
+      toast.success('Segment deleted', 'Delete Segment');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to delete segment', 'Delete Error');
     }
   },
 
   resetTurn: async (turnId: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to reset segment.', 'Reset Action');
+      return;
+    }
     try {
       const restored = await api.resetTurn(sess.id, turnId);
       set((state) => {
@@ -230,47 +337,67 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         };
       });
+      toast.success('Segment restored to model output', 'Reset Segment');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to reset segment', 'Reset Error');
     }
   },
 
   resetSession: async () => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to reset.', 'Reset Action');
+      return;
+    }
     try {
       const reset = await api.resetSession(sess.id);
       set({ session: reset });
+      toast.success('All edits reset to raw model output', 'Session Reset');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to reset session', 'Reset Error');
     }
   },
 
   undo: async () => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.warning('No active session to undo.', 'Undo');
+      return;
+    }
     try {
       const undone = await api.undoSession(sess.id);
       set({ session: undone });
+      toast.info('Reverted last edit', 'Undo');
     } catch (e: any) {
       set({ error: e.message });
+      toast.warning(e.message || 'Nothing more to undo', 'Undo');
     }
   },
 
   redo: async () => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.warning('No active session to redo.', 'Redo');
+      return;
+    }
     try {
       const redone = await api.redoSession(sess.id);
       set({ session: redone });
+      toast.info('Restored next edit', 'Redo');
     } catch (e: any) {
       set({ error: e.message });
+      toast.warning(e.message || 'Nothing more to redo', 'Redo');
     }
   },
 
   updateSpeaker: async (speakerId: string, updates: Partial<Speaker>) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to update speaker.', 'Speaker Action');
+      return;
+    }
     try {
       const updatedSpk = await api.updateSpeaker(sess.id, speakerId, updates);
       set((state) => {
@@ -282,25 +409,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         };
       });
+      toast.success('Speaker details updated', 'Speaker Saved');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to update speaker', 'Speaker Error');
     }
   },
 
   mergeSpeakers: async (sourceId: string, targetId: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to merge speakers.', 'Merge Action');
+      return;
+    }
     try {
       const merged = await api.mergeSpeakers(sess.id, sourceId, targetId);
       set({ session: merged });
+      toast.success('Speakers merged successfully', 'Speakers Merged');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to merge speakers', 'Merge Error');
     }
   },
 
   translateTurn: async (turnId: string) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to translate segment.', 'Translation Action');
+      return;
+    }
     try {
       const targetLang = sess.settings.target_language || 'en-IN';
       const updatedTurn = await api.translateTurn(sess.id, turnId, targetLang);
@@ -313,31 +450,50 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         };
       });
+      toast.success('Segment translated', 'Translation Complete');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to translate segment', 'Translation Error');
     }
   },
 
   translateAll: async () => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to translate.', 'Translation Action');
+      return;
+    }
     try {
       set({ isLoading: true });
       const targetLang = sess.settings.target_language || 'en-IN';
       await api.translateAll(sess.id, targetLang);
       await get().loadSession(sess.id);
+      toast.success('Complete transcript translated', 'Translation Complete');
     } catch (e: any) {
       set({ error: e.message, isLoading: false });
+      toast.error(e.message || 'Failed to translate transcript', 'Translation Error');
     }
   },
 
   addKeyterm: async (term: string) => {
     const sess = get().session;
-    if (!sess || !term.trim()) return;
+    if (!sess) {
+      toast.error('No active session found.', 'Vocabulary Action');
+      return;
+    }
+    const clean = term.trim();
+    if (!clean) {
+      toast.warning('Please enter a non-empty keyterm.', 'Vocabulary');
+      return;
+    }
     const current = sess.settings.keyterms || [];
-    if (current.includes(term.trim())) return;
-    const nextKeyterms = [...current, term.trim()];
+    if (current.includes(clean)) {
+      toast.warning(`Keyterm "${clean}" is already in vocabulary.`, 'Duplicate Keyterm');
+      return;
+    }
+    const nextKeyterms = [...current, clean];
     await get().updateSettings({ keyterms: nextKeyterms });
+    toast.success(`Keyterm "${clean}" added to vocabulary`, 'Vocabulary Updated');
   },
 
   removeKeyterm: async (term: string) => {
@@ -345,17 +501,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (!sess) return;
     const nextKeyterms = (sess.settings.keyterms || []).filter(k => k !== term);
     await get().updateSettings({ keyterms: nextKeyterms });
+    toast.info(`Keyterm "${term}" removed`, 'Vocabulary Updated');
   },
 
   updateSettings: async (settingsUpdate: Partial<SessionSettings>) => {
     const sess = get().session;
-    if (!sess) return;
+    if (!sess) {
+      toast.error('No active session to update settings.', 'Settings Action');
+      return;
+    }
     const mergedSettings = { ...sess.settings, ...settingsUpdate };
     try {
       const updated = await api.updateSession(sess.id, { settings: mergedSettings as any });
       set({ session: updated });
+      toast.success('Session settings updated', 'Settings Saved');
     } catch (e: any) {
       set({ error: e.message });
+      toast.error(e.message || 'Failed to save settings', 'Settings Error');
     }
   }
 }));
