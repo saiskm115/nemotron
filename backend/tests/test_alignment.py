@@ -1,5 +1,4 @@
-import pytest
-from backend.models.asr import ASRResult, ASRToken, ASRChunk
+from backend.models.asr import ASRResult, ASRToken
 from backend.models.diarization import DiarizationResult, DiarizationSegment
 from backend.pipeline.alignment import AlignmentEngine
 

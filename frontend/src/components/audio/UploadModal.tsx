@@ -2,9 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { api, UploadProgress } from '../../services/api';
 import { toast } from '../../stores/toastStore';
+import { ASRModelOption } from '../../types';
 import {
   UploadCloud, FileAudio, Check, AlertOctagon,
-  Loader2, X, RefreshCw, Sparkles, Sliders, Users, FileText, Languages
+  Loader2, X, RefreshCw, Sparkles, Sliders, Users, FileText, Languages, Cpu
 } from 'lucide-react';
 
 interface UploadModalProps {
@@ -16,8 +17,8 @@ interface UploadModalProps {
 const STAGES = [
   { id: 'uploading', label: 'Audio Upload', desc: 'Streaming audio stream to server', icon: UploadCloud },
   { id: 'preprocessing', label: '16kHz Audio Preprocessing', desc: 'Decoding AAC/AMR/M4A/WAV, resampling, mono normalization & peaks', icon: Sliders },
-  { id: 'diarizing', label: 'Nemotron-3 Speaker Diarization', desc: 'Neural speaker segmentation & overlap detection', icon: Users },
-  { id: 'transcribing', label: 'Telugu-English ASR', desc: 'AutoTinglish Whisper code-mixed speech recognition', icon: FileText },
+  { id: 'diarizing', label: 'Speaker Diarization', desc: 'Neural voice activity detection, speaker embeddings & clustering', icon: Users },
+  { id: 'transcribing', label: 'Speech Recognition', desc: 'Selected ASR model with word-level timestamps', icon: FileText },
   { id: 'aligning', label: 'Alignment & Translation', desc: 'Turn assembly & Sarvam neural translation', icon: Languages }
 ];
 
@@ -28,11 +29,27 @@ const ALLOWED_AUDIO_EXTS = [
 ];
 const CALL_RECORDING_EXTS = ['aac', 'm4a', 'amr', '3gp', '3gpp', 'opus'];
 
+const FALLBACK_MODELS: ASRModelOption[] = [
+  {
+    id: 'svanita_0_6b',
+    label: 'Svanita 0.6B — Parakeet TDT (Telugu + Hindi + English)',
+    description: 'Telugu in Telugu script with English kept in Latin script, in one pass.',
+    languages: ['te', 'hi', 'en'],
+    local: true,
+    recommended: true,
+    notes: '',
+    available: true,
+    selected: true
+  }
+];
+
 export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSessionCreated }) => {
   const { setSession } = useSessionStore();
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('Telugu English Executive Meeting');
   const [asrMode, setAsrMode] = useState<'codemix' | 'normal' | 'verbatim'>('codemix');
+  const [asrModel, setAsrModel] = useState<string>('');
+  const [asrModels, setAsrModels] = useState<ASRModelOption[]>([]);
   const [primaryLang, setPrimaryLang] = useState('te');
   const [targetLang, setTargetLang] = useState('en-IN');
   const [autoTranslate, setAutoTranslate] = useState(true);
@@ -50,6 +67,29 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
   const [errorStage, setErrorStage] = useState<string | null>(null);
 
   const timerRef = useRef<any>(null);
+
+  // Load the model catalogue so the selector reflects what this deployment can run.
+  useEffect(() => {
+    let cancelled = false;
+    api.listASRModels()
+      .then((models) => {
+        if (cancelled || !models?.length) return;
+        setAsrModels(models);
+        const preferred = models.find((m) => m.selected && m.available)
+          ?? models.find((m) => m.recommended && m.available)
+          ?? models.find((m) => m.available);
+        if (preferred) setAsrModel((current) => current || preferred.id);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAsrModels(FALLBACK_MODELS);
+          setAsrModel((current) => current || FALLBACK_MODELS[0].id);
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const selectedModel = asrModels.find((m) => m.id === asrModel);
 
   useEffect(() => {
     if (!isOpen) {
@@ -117,10 +157,14 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
       toast.warning('Please choose an audio file to process.', 'No File Selected');
       return;
     }
+    if (!asrModel) {
+      toast.warning('No transcription model is available on this server.', 'No ASR Model');
+      return;
+    }
 
-    // Confirmation Toast Dialogue before initiating processing
+    const engine = selectedModel?.label ?? asrModel;
     const confirmed = await toast.ask(
-      `Process "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB) with Nemotron-3 Diarization and AutoTinglish ASR?`,
+      `Process "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB) with speaker diarization and ${engine}?`,
       {
         title: 'Start Diarization Pipeline?',
         confirmLabel: 'Start Processing',
@@ -154,6 +198,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
     formData.append('file', file);
     formData.append('title', title);
     formData.append('asr_mode', asrMode);
+    formData.append('asr_model', asrModel);
     formData.append('primary_language', primaryLang);
     formData.append('target_language', targetLang);
     formData.append('auto_translate', autoTranslate ? 'true' : 'false');
@@ -458,23 +503,57 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
               </select>
             </div>
 
-            {/* ASR Model Engine Selector */}
-            <div className="flex flex-col gap-1">
+            {/* Transcription Model Selector */}
+            <div className="flex flex-col gap-1.5">
               <div className="flex justify-between items-center">
-                <label className="text-xs text-slate-300 font-medium">Primary ASR Engine:</label>
-                <span className="text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-                  Active: AutoTinglishSub
-                </span>
+                <label className="text-xs text-slate-300 font-medium flex items-center gap-1.5">
+                  <Cpu size={12} className="text-cyan-400" />
+                  Transcription Model:
+                </label>
+                {selectedModel && (
+                  <span className="text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
+                    {selectedModel.local ? 'ON-DEVICE' : 'CLOUD API'}
+                  </span>
+                )}
               </div>
               <select
+                value={asrModel}
+                onChange={(e) => setAsrModel(e.target.value)}
                 className="bg-slate-950 p-2 rounded-lg border border-cyan-500/40 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-400"
-                defaultValue="auto_tinglish_whisper_telugu"
+                aria-label="Transcription model"
               >
-                <option value="auto_tinglish_whisper_telugu">AutoTinglishSub — Whisper Telugu Small (Quantized INT8) [Recommended]</option>
-                <option value="vasista22_whisper_telugu">Vasista22 / Whisper Telugu Small (Fine-tuned)</option>
-                <option value="sarvam_saaras_v4">Sarvam Saaras V4 (Cloud REST API)</option>
-                <option value="whisper_large">OpenAI Whisper Large V3</option>
+                {asrModels.map((m) => (
+                  <option key={m.id} value={m.id} disabled={!m.available}>
+                    {m.label}
+                    {m.recommended ? ' — Recommended' : ''}
+                    {m.available ? '' : ' (unavailable)'}
+                  </option>
+                ))}
               </select>
+
+              {selectedModel && (
+                <div className="flex flex-col gap-1 rounded-lg border border-white/5 bg-slate-950/60 p-2.5">
+                  <p className="text-[11px] text-slate-400 leading-relaxed">{selectedModel.description}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {selectedModel.languages.map((lang) => (
+                      <span
+                        key={lang}
+                        className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700 font-mono uppercase"
+                      >
+                        {lang}
+                      </span>
+                    ))}
+                  </div>
+                  {!selectedModel.available && selectedModel.unavailable_reason && (
+                    <p className="text-[11px] text-amber-400">
+                      Unavailable: {selectedModel.unavailable_reason}
+                    </p>
+                  )}
+                  {selectedModel.available && selectedModel.notes && (
+                    <p className="text-[11px] text-slate-500">{selectedModel.notes}</p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ASR Mode Selection */}
@@ -549,7 +628,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onSes
             </button>
             <button
               onClick={handleUpload}
-              disabled={!file}
+              disabled={!file || !asrModel}
               className="btn btn-primary px-5 py-2 text-xs flex items-center gap-2 disabled:opacity-50"
             >
               <Check size={14} />

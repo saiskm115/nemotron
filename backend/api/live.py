@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..pipeline.streaming_pipeline import StreamingPipeline
 from ..storage.session_store import session_store
-from ..models.session import SessionCreate, SessionSettings
+from ..models.session import SessionCreate
 
 router = APIRouter(tags=["live"])
 
@@ -52,6 +52,8 @@ async def live_audio_websocket(websocket: WebSocket, session_id: str):
                 if cmd.get("action") == "stop":
                     await audio_queue.put(b"")
                     break
+                if cmd.get("action") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
         await audio_queue.put(b"")
     finally:

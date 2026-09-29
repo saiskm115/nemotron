@@ -1,10 +1,9 @@
-import copy
 import json
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Any
-from ..models.session import Session, SessionCreate, SessionUpdate, EditCommand
+from ..models.session import Session, SessionCreate, SessionUpdate
+from ..models.annotation import Annotation, AnnotationCreate, AnnotationUpdate
 from ..models.speaker import Speaker, SpeakerUpdate
 from ..models.turn import Turn, TurnUpdate, TurnSplitRequest, TurnMergeRequest, LanguageSegment
 from ..pipeline.alignment import parse_language_segments
@@ -132,10 +131,11 @@ class SessionStore:
         start: float,
         end: float,
         text: str,
-        confidence: float = 0.95,
+        confidence: Optional[float] = None,
         language_segments: Optional[List[LanguageSegment]] = None,
         translated_text: Optional[str] = None,
-        speaker_id: Optional[str] = None
+        speaker_id: Optional[str] = None,
+        source_language: Optional[str] = None
     ) -> Optional[Turn]:
         session = self.get_session(session_id)
         if not session:
@@ -148,6 +148,8 @@ class SessionStore:
                 t.end = round(end, 3)
                 t.text = text
                 t.confidence = confidence
+                if source_language:
+                    t.source_language = source_language
                 if language_segments is not None:
                     t.language_segments = language_segments
                 else:
@@ -374,6 +376,119 @@ class SessionStore:
         self.persist(session_id)
         return session
 
+    # --- Annotation Operations ---
+
+    def list_annotations(self, session_id: str) -> List[Annotation]:
+        session = self.get_session(session_id)
+        if not session:
+            return []
+        return sorted(session.annotations, key=lambda a: (a.start, a.end))
+
+    def create_annotation(self, session_id: str, req: AnnotationCreate) -> Optional[Annotation]:
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        annotation = Annotation(
+            start=req.start,
+            end=req.end,
+            text=req.text,
+            label=req.label,
+            speaker_id=req.speaker_id,
+            turn_id=req.turn_id,
+            author=req.author,
+            source="manual",
+        )
+        annotation.normalised(session.duration or None)
+        session.annotations.append(annotation)
+        self.persist(session_id)
+        return annotation
+
+    def update_annotation(
+        self, session_id: str, annotation_id: str, update: AnnotationUpdate
+    ) -> Optional[Annotation]:
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        for annotation in session.annotations:
+            if annotation.id != annotation_id:
+                continue
+            if update.start is not None:
+                annotation.start = update.start
+            if update.end is not None:
+                annotation.end = update.end
+            if update.text is not None:
+                annotation.text = update.text
+            if update.label is not None:
+                annotation.label = update.label
+            if update.speaker_id is not None:
+                annotation.speaker_id = update.speaker_id
+            if update.turn_id is not None:
+                annotation.turn_id = update.turn_id
+            if update.author is not None:
+                annotation.author = update.author
+            annotation.normalised(session.duration or None)
+            annotation.updated_at = datetime.utcnow().isoformat()
+            self.persist(session_id)
+            return annotation
+        return None
+
+    def delete_annotation(self, session_id: str, annotation_id: str) -> bool:
+        session = self.get_session(session_id)
+        if not session:
+            return False
+        before = len(session.annotations)
+        session.annotations = [a for a in session.annotations if a.id != annotation_id]
+        if len(session.annotations) == before:
+            return False
+        self.persist(session_id)
+        return True
+
+    def apply_annotation_to_turns(
+        self, session_id: str, annotation_id: str, min_coverage: float = 0.5
+    ) -> int:
+        """
+        Re-labels the turns a ``speaker_label`` annotation covers.
+
+        This is the manual answer to a model that split one person into four or
+        merged two into one: the reviewer draws a region on the timeline, says who
+        is speaking in it, and the transcript follows.
+
+        Coverage is measured against the *turn*, not against the annotation. A
+        half-second label sitting inside a four-second turn covers a sixth of it and
+        must not drag the whole turn with it; a label spanning the turn covers all
+        of it and does.
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return 0
+        annotation = next((a for a in session.annotations if a.id == annotation_id), None)
+        if not annotation or not annotation.speaker_id:
+            return 0
+
+        changed = 0
+        before = [t.model_dump() for t in session.turns]
+
+        for turn in session.turns:
+            if turn.speaker_id == annotation.speaker_id:
+                continue
+            turn_span = max(1e-6, turn.end - turn.start)
+            overlap = max(0.0, min(turn.end, annotation.end) - max(turn.start, annotation.start))
+            if overlap / turn_span < min_coverage:
+                continue
+            turn.speaker_id = annotation.speaker_id
+            turn.source = "user_edit"
+            turn.status = "edited"
+            changed += 1
+
+        if changed:
+            self._recalculate_speaker_stats(session)
+            after = [t.model_dump() for t in session.turns]
+            self.get_history(session_id).record_edit(
+                "apply_annotation", {"turns": before}, {"turns": after}
+            )
+            self.persist(session_id)
+        return changed
+
     # --- History (Undo / Redo) ---
 
     def undo(self, session_id: str) -> Optional[Session]:
@@ -385,8 +500,8 @@ class SessionStore:
             return session
         
         # Apply before state
-        if cmd.type in ("split_turn", "merge_turns", "delete_turn"):
-            session.turns = [Turn(**t) for t in cmd.before]
+        if cmd.type in ("split_turn", "merge_turns", "delete_turn", "apply_annotation"):
+            session.turns = [Turn(**t) for t in cmd.before["turns"]]
         elif cmd.type == "turn_update":
             t_id = cmd.before["id"]
             for i, t in enumerate(session.turns):
@@ -410,8 +525,8 @@ class SessionStore:
             return session
 
         # Apply after state
-        if cmd.type in ("split_turn", "merge_turns", "delete_turn"):
-            session.turns = [Turn(**t) for t in cmd.after]
+        if cmd.type in ("split_turn", "merge_turns", "delete_turn", "apply_annotation"):
+            session.turns = [Turn(**t) for t in cmd.after["turns"]]
         elif cmd.type == "turn_update":
             t_id = cmd.after["id"]
             for i, t in enumerate(session.turns):

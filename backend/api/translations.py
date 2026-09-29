@@ -1,7 +1,7 @@
 import os
 from fastapi import APIRouter, HTTPException
 from ..storage.session_store import session_store
-from ..models.translation import TranslationRequest, TranslationResult
+from ..models.translation import TranslationRequest
 from ..providers.translation.sarvam import SarvamTranslationProvider
 from ..providers.translation.mock_translation import MockTranslationProvider
 

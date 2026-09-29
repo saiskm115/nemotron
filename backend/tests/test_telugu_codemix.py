@@ -1,4 +1,3 @@
-import pytest
 from backend.pipeline.alignment import parse_language_segments
 
 def test_pure_telugu():

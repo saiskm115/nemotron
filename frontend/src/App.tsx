@@ -238,6 +238,7 @@ export const App: React.FC = () => {
           </span>
           <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
             Diarization → ASR → Alignment → Translation
+            {session?.settings?.asr_model ? ` · ${session.settings.asr_model}` : ''}
           </span>
         </div>
       )}

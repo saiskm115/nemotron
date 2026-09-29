@@ -2,6 +2,7 @@ import os
 import time
 from pathlib import Path
 from typing import Optional
+
 from ..models.session import Session
 from ..models.audio import AudioInput
 from ..models.asr import ASROptions, ASRMode
@@ -9,13 +10,23 @@ from ..models.diarization import DiarizationOptions
 from ..models.translation import TranslationRequest
 from .audio_preprocessor import AudioPreprocessor
 from .alignment import AlignmentEngine
+from .backchannel_rescue import rescue_backchannels
 from .turn_builder import TurnBuilder
-from ..providers.asr.auto_tinglish_whisper import AutoTinglishWhisperProvider
-from ..providers.asr.sarvam_saaras import SarvamSaarasProvider
+from ..providers.asr.registry import get_asr_provider, primary_model_id
+from ..providers.diarization.local_diarization import LocalDiarizationProvider
 from ..providers.diarization.nemotron import NemotronDiarizationProvider
-from ..providers.diarization.mock_nemotron import MockNemotronProvider
 from ..providers.translation.sarvam import SarvamTranslationProvider
 from ..providers.translation.mock_translation import MockTranslationProvider
+
+
+def _env_int(name: str, fallback: int) -> int:
+    """Reads a positive integer from the environment, ignoring anything unusable."""
+    try:
+        value = int(os.environ.get(name, "").strip())
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
 
 class OfflinePipeline:
     def __init__(
@@ -28,19 +39,27 @@ class OfflinePipeline:
         self.preprocessor = audio_preprocessor or AudioPreprocessor(target_sample_rate=16000)
         self.alignment_engine = AlignmentEngine()
         self.turn_builder = TurnBuilder()
-        
+
         # Determine providers based on env
         sarvam_key = os.environ.get("SARVAM_API_KEY", "")
         nemotron_endpoint = os.environ.get("NEMOTRON_ENDPOINT", "")
 
-        # AutoTinglishSub Whisper Telugu Small/Quantized is primary ASR
-        self.asr_provider = asr_provider or AutoTinglishWhisperProvider(model_size_or_path="small", compute_type="int8")
+        # ASR model is resolved per session from session.settings.asr_model.
+        self.default_asr_model = primary_model_id()
+        self.asr_provider = asr_provider
         self.diarization_provider = diarization_provider or (
-            NemotronDiarizationProvider(endpoint=nemotron_endpoint) if nemotron_endpoint else MockNemotronProvider()
+            NemotronDiarizationProvider(endpoint=nemotron_endpoint) if nemotron_endpoint else LocalDiarizationProvider()
         )
         self.translation_provider = translation_provider or (
             SarvamTranslationProvider(api_key=sarvam_key) if sarvam_key else MockTranslationProvider()
         )
+
+    def _asr_for(self, model_id: Optional[str]):
+        """Returns (provider, resolved_model_id) for the requested ASR model."""
+        resolved = model_id if model_id else self.default_asr_model
+        if self.asr_provider is not None:
+            return self.asr_provider, resolved
+        return get_asr_provider(resolved), resolved
 
     async def run(
         self,
@@ -61,7 +80,10 @@ class OfflinePipeline:
 
         # 2. Run Diarization
         t0_diar = time.time()
-        diar_options = DiarizationOptions(max_speakers=8)
+        diar_options = DiarizationOptions(
+            max_speakers=_env_int("DIARIZATION_MAX_SPEAKERS", 8),
+            min_speakers=_env_int("DIARIZATION_MIN_SPEAKERS", 1),
+        )
         prepared_input = AudioInput(
             file_path=str(out_wav_path),
             raw_bytes=pcm_bytes,
@@ -78,18 +100,34 @@ class OfflinePipeline:
         elif session.settings.asr_mode == "verbatim":
             asr_mode_val = ASRMode.VERBATIM
 
-        primary_lang = session.settings.primary_language
-        if not primary_lang or primary_lang.lower() in ["unknown", "auto", ""]:
-            primary_lang = "te-IN"
-
+        asr_provider, asr_model_id = self._asr_for(session.settings.asr_model)
         asr_options = ASROptions(
+            model=asr_model_id,
             mode=asr_mode_val,
-            language_code=primary_lang,
+            language_code=session.settings.primary_language,
             with_timestamps=True,
             keyterms=session.settings.keyterms
         )
-        asr_result = await self.asr_provider.transcribe_file(prepared_input, asr_options)
+        asr_result = await asr_provider.transcribe_file(prepared_input, asr_options)
         asr_latency = time.time() - t0_asr
+
+        # 3b. Rescue pass for short interjections the whole-file decode dropped.
+        # "avunu" / "yeah" / "ah" between two longer turns is a 200-350 ms
+        # window, and a single missing token there removes the speech from the
+        # transcript entirely. Re-decode just those regions, in isolation.
+        t0_rescue = time.time()
+        rescued_tokens, rescued_count = await rescue_backchannels(
+            asr_provider,
+            str(out_wav_path),
+            diar_result.segments,
+            list(asr_result.tokens),
+            asr_options,
+            duration=metadata.duration_sec,
+        )
+        if rescued_count:
+            asr_result.tokens = rescued_tokens
+            asr_result.transcript = " ".join(t.text for t in rescued_tokens if t.is_final)
+        rescue_latency = time.time() - t0_rescue
 
         # 4. Alignment
         t0_align = time.time()
@@ -97,7 +135,12 @@ class OfflinePipeline:
         align_latency = time.time() - t0_align
 
         # 5. Build turns and speakers
-        turns, speakers = self.turn_builder.build_turns(aligned_units, session.speakers, diar_result.segments)
+        turns, speakers = self.turn_builder.build_turns(
+            aligned_units,
+            session.speakers,
+            diar_result.segments,
+            source_language=asr_result.language_code,
+        )
         for t in turns:
             t.start = max(0.0, round(t.start, 3))
             t.end = min(round(max(t.start + 0.05, t.end), 3), round(session.duration, 3))
@@ -121,7 +164,7 @@ class OfflinePipeline:
                     trans_res = await self.translation_provider.translate(req)
                     turn.translated_text = trans_res.translated_text
                     turn.translation_status = "complete"
-                except Exception as ex:
+                except Exception:
                     turn.translation_status = "failed"
             trans_latency = time.time() - t0_trans
 
@@ -130,9 +173,17 @@ class OfflinePipeline:
         session.processing_status = "complete"
         session.metadata["observability"] = {
             "audio_duration_sec": metadata.duration_sec,
+            "asr_model": asr_model_id,
+            "asr_language": asr_result.language_code,
+            "diarization_method": diar_result.method,
+            "diarization_speaker_count": len(diar_result.speakers),
+            "estimated_speaker_count": diar_result.metadata.get("estimated_speaker_count"),
+            "speakers_before_consolidation": diar_result.metadata.get("speakers_before_consolidation"),
             "asr_latency_sec": round(asr_latency, 3),
             "diarization_latency_sec": round(diar_latency, 3),
             "alignment_latency_sec": round(align_latency, 3),
+            "backchannel_rescue_latency_sec": round(rescue_latency, 3),
+            "backchannel_tokens_recovered": rescued_count,
             "translation_latency_sec": round(trans_latency, 3),
             "total_processing_time_sec": round(total_time, 3),
             "speaker_count": len(speakers),

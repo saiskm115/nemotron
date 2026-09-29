@@ -1,5 +1,4 @@
 import json
-from typing import Dict, Any
 from ..models.session import Session
 
 def export_json(session: Session) -> str:

@@ -5,13 +5,15 @@ import {
   Users, Sliders, Clock, Edit2, Check, X,
   GitMerge, AlertTriangle, Languages, RotateCcw,
   Hash, Mic2, Activity, ChevronRight, Trash2,
-  PieChart, BarChart2
+  PieChart, BarChart2, Tag
 } from 'lucide-react';
+import { AnnotationPanel } from '../annotations/AnnotationPanel';
 
 export const RightSidebar: React.FC = () => {
   const {
     session, selectedTurnId, isSidebarOpen, sidebarTab, setSidebarTab,
-    updateSpeaker, mergeSpeakers, updateTurn, translateTurn, setCurrentTime, resetTurn
+    updateSpeaker, mergeSpeakers, updateTurn, translateTurn, setCurrentTime, resetTurn,
+    annotations
   } = useSessionStore();
 
   const [editingSpkId, setEditingSpkId] = useState<string | null>(null);
@@ -98,6 +100,7 @@ export const RightSidebar: React.FC = () => {
       }}>
         {[
           { key: 'speakers', icon: <Users size={12} />, label: `Speakers (${speakers.length})` },
+          { key: 'annotations', icon: <Tag size={12} />, label: `Labels (${annotations.length})` },
           { key: 'properties', icon: <Sliders size={12} />, label: 'Inspector' },
         ].map(tab => (
           <button
@@ -118,6 +121,13 @@ export const RightSidebar: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* ── Tab: Manual annotations (Section 41) ──────────────────────── */}
+      {sidebarTab === 'annotations' && (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+          <AnnotationPanel />
+        </div>
+      )}
 
       {/* ── Tab: Speakers ─────────────────────────────────────────────── */}
       {sidebarTab === 'speakers' && (

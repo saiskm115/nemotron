@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from ..models.turn import Turn, TurnUpdate, TurnSplitRequest, TurnMergeRequest, TurnRetranscribeRequest
 from ..storage.session_store import session_store, parse_language_segments
-from ..providers.asr.auto_tinglish_whisper import AutoTinglishWhisperProvider
+from ..providers.asr.registry import get_asr_provider
 from ..models.asr import ASROptions, ASRMode
 from ..models.translation import TranslationRequest
 from ..api.translations import get_translation_provider
@@ -12,7 +12,6 @@ from ..api.translations import get_translation_provider
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/transcription", tags=["transcription"])
-asr_engine = AutoTinglishWhisperProvider(model_size_or_path="small", compute_type="int8")
 
 async def _perform_turn_retranscription(
     session_id: str,
@@ -42,6 +41,7 @@ async def _perform_turn_retranscription(
         asr_mode_val = ASRMode.VERBATIM
 
     asr_options = ASROptions(
+        model=session.settings.asr_model,
         mode=asr_mode_val,
         language_code=session.settings.primary_language,
         with_timestamps=True,
@@ -50,6 +50,7 @@ async def _perform_turn_retranscription(
 
     audio_file_path = session.audio_file_path if (session.audio_file_path and os.path.exists(session.audio_file_path)) else None
 
+    asr_engine = get_asr_provider(session.settings.asr_model)
     asr_res = await asr_engine.transcribe_interval(
         audio_file_path=audio_file_path,
         start_time=start,
@@ -58,12 +59,16 @@ async def _perform_turn_retranscription(
     )
 
     new_text = asr_res.transcript.strip()
-    if asr_res.tokens:
-        conf = round(sum(t.confidence for t in asr_res.tokens) / len(asr_res.tokens), 2)
-    else:
-        conf = 0.95
+    confidences = [t.confidence for t in asr_res.tokens if t.confidence is not None]
+    conf = round(sum(confidences) / len(confidences), 2) if confidences else None
 
     lang_segs, _ = parse_language_segments(new_text)
+    source_language = (
+        asr_res.language_code
+        or turn.source_language
+        or session.settings.primary_language
+        or "te-IN"
+    )
 
     # Auto-translate if enabled or turn previously had translation
     new_translation = None
@@ -89,7 +94,8 @@ async def _perform_turn_retranscription(
         confidence=conf,
         language_segments=lang_segs,
         translated_text=new_translation,
-        speaker_id=speaker_id
+        speaker_id=speaker_id,
+        source_language=source_language
     )
 
     if not updated_turn:

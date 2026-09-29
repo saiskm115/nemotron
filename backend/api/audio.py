@@ -1,11 +1,13 @@
 import os
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from ..storage.session_store import session_store
 from ..storage.audio_store import audio_store
 from ..models.session import SessionCreate, SessionSettings
 from ..pipeline.offline_pipeline import OfflinePipeline
+from ..providers.asr.registry import DEFAULT_MODEL as DEFAULT_ASR_MODEL
+from ..providers.asr.registry import list_asr_models
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 pipeline = OfflinePipeline()
@@ -15,6 +17,7 @@ async def upload_audio(
     file: UploadFile = File(...),
     title: str = Form("Uploaded Audio Session"),
     asr_mode: str = Form("codemix"),
+    asr_model: str = Form(DEFAULT_ASR_MODEL),
     primary_language: str = Form("te-IN"),
     target_language: str = Form("en-IN"),
     auto_translate: bool = Form(False)
@@ -44,6 +47,7 @@ async def upload_audio(
     # 1. Create session
     settings = SessionSettings(
         asr_mode=asr_mode,
+        asr_model=asr_model or DEFAULT_ASR_MODEL,
         primary_language=primary_language,
         target_language=target_language,
         auto_translate=auto_translate
@@ -72,6 +76,11 @@ async def upload_audio(
         session.error_message = str(e)
         session_store.persist(session.id)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+@router.get("/models")
+async def list_models():
+    """Catalogue of selectable transcription models and their availability here."""
+    return {"models": list_asr_models()}
 
 @router.get("/{session_id}/stream")
 async def stream_audio(session_id: str):

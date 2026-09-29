@@ -1,19 +1,34 @@
 asr:
-  primary: auto_tinglish_whisper_telugu
-  model_variant: whisper_telugu_small_int8
+  # Registry id of the model to use when a session does not choose one.
+  # See backend/providers/asr/registry.py for the full catalogue.
+  primary: svanita_0_6b
   supported:
-    - auto_tinglish_whisper_telugu
+    - svanita_0_6b
+    - svanita_0_6b_telugu
+    - indic_conformer_600m
+    - whisper_small_int8
+    - vasista22_whisper_telugu
+    - whisper_large_v3
     - sarvam_saaras_v4
-    - sarvam_saaras_v3
-    - whisper
-    - indic_conformer
 
 diarization:
-  primary: nemotron_3_diarization
+  # "local_acoustic" runs VAD + ECAPA-TDNN speaker embeddings + agglomerative
+  # clustering on CPU. Set NEMOTRON_ENDPOINT to route to a remote Nemotron/Sortformer
+  # service instead; installing nemo_toolkit enables local Sortformer.
+  #
+  # Whichever backend runs, the result is re-clustered against measured speaker
+  # embeddings to the number of voices actually present. Backends treat a speaker
+  # limit as a capacity rather than a prediction -- Sortformer is a power-set model
+  # and will label a two-voice call with all four of its classes -- so max_speakers
+  # is a ceiling on the published count, not a hint to the model.
+  primary: local_acoustic
   supported:
-    - nemotron_3_diarization
-    - pyannote
-    - local_sortformer
+    - local_acoustic
+    - sortformer
+    - nemotron_endpoint
+  max_speakers: 8
+  min_speakers: 1
+  auto_speaker_count: true
 
 translation:
   primary: sarvam
@@ -26,7 +41,6 @@ audio:
   sample_rate: 16000
   channels: 1
   format: wav
-  chunk_duration_sec: 1.0
 
 alignment:
   overlap_threshold_sec: 0.15

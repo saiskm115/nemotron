@@ -40,8 +40,53 @@ export interface Speaker {
   model_label: string;
 }
 
+/** The kinds of label a reviewer can draw on the timeline. */
+export type AnnotationLabel =
+  | "note"
+  | "important"
+  | "question"
+  | "action_item"
+  | "review"
+  | "backchannel"
+  | "speaker_label"
+  | "error";
+
+export const ANNOTATION_LABELS: {
+  id: AnnotationLabel;
+  label: string;
+  color: string;
+  hint: string;
+}[] = [
+  { id: "note", label: "Note", color: "#38bdf8", hint: "General observation" },
+  { id: "important", label: "Important", color: "#f59e0b", hint: "Must not be missed" },
+  { id: "question", label: "Question", color: "#a855f7", hint: "Open question" },
+  { id: "action_item", label: "Action", color: "#10b981", hint: "Someone has to do this" },
+  { id: "review", label: "Review", color: "#06b6d4", hint: "Needs a second pass" },
+  { id: "backchannel", label: "Backchannel", color: "#ec4899", hint: "Short interjection" },
+  { id: "speaker_label", label: "Speaker", color: "#f43f5e", hint: "Assign who speaks here" },
+  { id: "error", label: "Error", color: "#ef4444", hint: "Diarisation or ASR is wrong" },
+];
+
+/** A manual label drawn on the timeline by a reviewer. */
+export interface Annotation {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  label: AnnotationLabel;
+  /** Which voice this label is about. Null means "this region". */
+  speaker_id?: string | null;
+  turn_id?: string | null;
+  source: "manual" | "model";
+  author?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface SessionSettings {
   asr_mode: "normal" | "codemix" | "verbatim";
+  /** Registry id of the transcription model used for this session. */
+  asr_model: string;
   primary_language: string;
   target_language: string;
   auto_translate: boolean;
@@ -51,13 +96,32 @@ export interface SessionSettings {
   transliteration_mode: "script" | "roman" | "codemix";
 }
 
+/** A selectable speech-to-text model as reported by GET /api/audio/models. */
+export interface ASRModelOption {
+  id: string;
+  label: string;
+  description: string;
+  languages: string[];
+  local: boolean;
+  recommended: boolean;
+  notes: string;
+  available: boolean;
+  selected: boolean;
+  requires_api_key?: string;
+  unavailable_reason?: string;
+}
+
 export interface AudioMetadata {
   duration_sec: number;
   sample_rate: number;
   channels: number;
   sample_count: number;
   rms_db: number;
+  peak_db?: number;
+  /** Coarse waveform envelope (peak_levels[0]). */
   peaks: number[];
+  /** Resolution pyramid, coarsest first. The timeline picks a level from its zoom. */
+  peak_levels?: number[][];
 }
 
 export interface Session {
@@ -71,6 +135,8 @@ export interface Session {
   target_language?: string;
   speakers: Speaker[];
   turns: Turn[];
+  /** Manual labels drawn on the timeline by a reviewer. */
+  annotations?: Annotation[];
   processing_status: "uploading" | "processing" | "complete" | "failed";
   error_message?: string;
   mode: "live" | "offline";

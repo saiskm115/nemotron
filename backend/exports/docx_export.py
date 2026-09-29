@@ -1,7 +1,7 @@
 import io
-from typing import List, Dict
+from typing import Dict
 import docx
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from ..models.session import Session
 
@@ -14,15 +14,15 @@ def export_docx(session: Session, include_translation: bool = True) -> bytes:
 
     # Metadata Paragraph
     meta = doc.add_paragraph()
-    meta.add_run(f"Session ID: ").bold = True
+    meta.add_run("Session ID: ").bold = True
     meta.add_run(f"{session.id} | ")
-    meta.add_run(f"Duration: ").bold = True
+    meta.add_run("Duration: ").bold = True
     mins = int(session.duration // 60)
     secs = int(session.duration % 60)
     meta.add_run(f"{mins:02d}:{secs:02d} | ")
-    meta.add_run(f"Speakers: ").bold = True
+    meta.add_run("Speakers: ").bold = True
     meta.add_run(f"{len(session.speakers)} | ")
-    meta.add_run(f"Languages: ").bold = True
+    meta.add_run("Languages: ").bold = True
     meta.add_run(", ".join(session.source_languages))
 
     doc.add_heading("Speakers", level=2)

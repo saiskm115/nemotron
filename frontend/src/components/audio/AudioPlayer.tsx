@@ -1,5 +1,5 @@
-import React, { useRef, useEffect } from 'react';
-import { useSessionStore } from '../../stores/sessionStore';
+import React, { useRef, useEffect, useCallback } from 'react';
+import { useSessionStore, SpeakerGainState } from '../../stores/sessionStore';
 import {
   Play,
   Pause,
@@ -10,8 +10,16 @@ import {
   VolumeX
 } from 'lucide-react';
 
+/** True when the playhead falls inside any diarised turn. */
+function isInsideAnyTurn(time: number, turns: { start: number; end: number }[]): boolean {
+  return turns.some((turn) => time >= turn.start && time <= turn.end);
+}
+
 export const AudioPlayer: React.FC = () => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const speakerGainRef = useRef<GainNode | null>(null);
   const {
     session,
     currentTime,
@@ -22,6 +30,7 @@ export const AudioPlayer: React.FC = () => {
     isMuted,
     isLooping,
     selectedTurnId,
+    speakerGains,
     setCurrentTime,
     setIsPlaying,
     setPlaybackRate,
@@ -44,6 +53,91 @@ export const AudioPlayer: React.FC = () => {
 
   const audioSrc = session?.id ? `/api/audio/${session.id}/stream` : '';
   const turns = session?.turns || [];
+
+  /* ── Per-speaker gain graph ────────────────────────────────────────────
+   * The single <audio> element is routed through a Web Audio graph with one gain
+   * node, and each speaker's node is opened only while the playhead sits inside one
+   * of that speaker's turns. That makes the timeline's mute/solo controls actually
+   * change what you hear, which is what every editor's per-track controls do.
+   */
+  const ensureAudioGraph = useCallback(() => {
+    const el = audioRef.current;
+    if (!el || ctxRef.current) return;
+
+    const AudioCtx: typeof AudioContext =
+      window.AudioContext ?? (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+
+    try {
+      const ctx = new AudioCtx();
+      const source = ctx.createMediaElementSource(el);
+      const speakerGain = ctx.createGain();
+      const masterGain = ctx.createGain();
+      source.connect(speakerGain);
+      speakerGain.connect(masterGain);
+      masterGain.connect(ctx.destination);
+      ctxRef.current = ctx;
+      speakerGainRef.current = speakerGain;
+      masterGainRef.current = masterGain;
+    } catch {
+      // Browsers refuse a second MediaElementSource for the same element; without
+      // a graph the transport still works, just without per-speaker mute/solo.
+      ctxRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    ensureAudioGraph();
+  }, [ensureAudioGraph, audioSrc]);
+
+  useEffect(() => {
+    if (isPlaying && ctxRef.current?.state === 'suspended') {
+      ctxRef.current.resume().catch(() => {});
+    }
+  }, [isPlaying]);
+
+  useEffect(() => {
+    const master = masterGainRef.current;
+    if (!master) return;
+    const target = isMuted ? 0 : volume;
+    master.gain.setTargetAtTime(target, ctxRef.current?.currentTime ?? 0, 0.02);
+  }, [volume, isMuted]);
+
+  // Open the speaker bus only while the playhead sits inside an audible speaker's turn.
+  // Solo takes precedence over mute, exactly like a mixer: soloing any track silences
+  // the others, and mute only applies when nothing is soloed.
+  useEffect(() => {
+    const gain = speakerGainRef.current;
+    if (!gain) return;
+    const config = speakerGains;
+    const now = ctxRef.current?.currentTime ?? 0;
+
+    if (!config) {
+      gain.gain.setTargetAtTime(1, now, 0.02);
+      return;
+    }
+
+    const soloIds = Object.entries(config.solo).filter(([, on]) => on).map(([id]) => id);
+    let audible = false;
+    for (const turn of turns) {
+      if (currentTime < turn.start || currentTime > turn.end) continue;
+      const allowed = config.soloActive
+        ? soloIds.includes(turn.speaker_id)
+        : !config.muted[turn.speaker_id];
+      if (allowed) {
+        audible = true;
+        break;
+      }
+    }
+
+    // Between turns (silence) nothing is suppressed: the audio there is not speech
+    // we are asked to hear selectively.
+    if (!isInsideAnyTurn(currentTime, turns)) {
+      audible = true;
+    }
+
+    gain.gain.setTargetAtTime(audible ? 1 : 0, now, 0.02);
+  }, [speakerGains, currentTime, turns]);
 
   // Play / Pause audio element sync
   useEffect(() => {
@@ -72,13 +166,6 @@ export const AudioPlayer: React.FC = () => {
       audioRef.current.playbackRate = playbackRate;
     }
   }, [playbackRate]);
-
-  // Volume & Mute
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = isMuted ? 0 : volume;
-    }
-  }, [volume, isMuted]);
 
   // Keyboard transport shortcuts (Space, Left/Right arrows, J/K/L)
   useEffect(() => {
@@ -142,10 +229,15 @@ export const AudioPlayer: React.FC = () => {
 
   // High-precision time format: 00:12.430
   const formatTimecode = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    const ms = Math.floor((secs - Math.floor(secs)) * 1000);
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+    const safe = Math.max(0, secs || 0);
+    const h = Math.floor(safe / 3600);
+    const m = Math.floor((safe % 3600) / 60);
+    const s = Math.floor(safe % 60);
+    const ms = Math.floor((safe - Math.floor(safe)) * 1000);
+    const pad = (n: number, w = 2) => n.toString().padStart(w, '0');
+    return h > 0
+      ? `${pad(h)}:${pad(m)}:${pad(s)}.${pad(ms, 3)}`
+      : `${pad(m)}:${pad(s)}.${pad(ms, 3)}`;
   };
 
   return (

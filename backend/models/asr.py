@@ -27,7 +27,8 @@ class ASRChunk(BaseModel):
     tokens: List[ASRToken] = Field(default_factory=list)
 
 class ASROptions(BaseModel):
-    model: str = "saaras:v4"
+    # Registry id of the model to run (see providers/asr/registry.py).
+    model: str = ""
     mode: ASRMode = ASRMode.CODEMIXED
     language_code: Optional[str] = "unknown" # "unknown", "te-IN", "en-IN"
     with_timestamps: bool = True

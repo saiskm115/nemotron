@@ -1,4 +1,4 @@
-import { Session, Turn, Speaker, SessionSettings } from '../types';
+import { ASRModelOption, Session, Turn, Speaker, SessionSettings, Annotation, AnnotationLabel } from '../types';
 
 const API_BASE = '/api';
 
@@ -72,6 +72,28 @@ export const api = {
     return handleResponse<Session>(res, 'Failed to redo');
   },
 
+  // Speech-to-text model catalogue
+  async listASRModels(): Promise<ASRModelOption[]> {
+    const res = await fetch(`${API_BASE}/audio/models`);
+    const data = await handleResponse<{ models: ASRModelOption[] }>(res, 'Failed to load ASR models');
+    return data.models;
+  },
+
+  // ASR benchmark
+  async getBenchmarkReference(): Promise<{ models: any[] }> {
+    const res = await fetch(`${API_BASE}/benchmark/reference`);
+    return handleResponse<{ models: any[] }>(res, 'Failed to load benchmark reference figures');
+  },
+
+  async runBenchmark(payload: { model_ids?: string[] }): Promise<any> {
+    const res = await fetch(`${API_BASE}/benchmark/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return handleResponse<any>(res, 'Benchmark run failed');
+  },
+
   // Audio Upload
   async uploadAudio(formData: FormData): Promise<Session> {
     const res = await fetch(`${API_BASE}/audio/upload`, {
@@ -138,12 +160,12 @@ export const api = {
             currentPercent += 1.8;
             currentStageIndex = 3;
             currentStage = 'diarizing';
-            currentDetail = 'Nemotron-3 Speaker Diarization: Neural speaker segmentation & VAD';
+            currentDetail = 'Speaker Diarization: voice activity detection & speaker-embedding clustering';
           } else if (currentPercent < 88) {
             currentPercent += 1.5;
             currentStageIndex = 4;
             currentStage = 'transcribing';
-            currentDetail = 'Speech Recognition: AutoTinglish Telugu-English code-mixed Whisper';
+            currentDetail = `Speech Recognition: ${formData.get('asr_model') || 'selected model'} (${formData.get('primary_language') || 'auto'})`;
           } else {
             currentPercent += 0.8;
             currentStageIndex = 5;
@@ -298,6 +320,64 @@ export const api = {
       body: JSON.stringify({ source_speaker_id: sourceSpeakerId, target_speaker_id: targetSpeakerId })
     });
     return handleResponse<Session>(res, 'Failed to merge speakers');
+  },
+
+  // Annotations (manual labels drawn on the timeline)
+  async listAnnotations(sessionId: string): Promise<Annotation[]> {
+    const res = await fetch(`${API_BASE}/annotations/${sessionId}`);
+    return handleResponse<Annotation[]>(res, 'Failed to load annotations');
+  },
+
+  async createAnnotation(
+    sessionId: string,
+    data: {
+      start: number;
+      end: number;
+      text?: string;
+      label?: AnnotationLabel;
+      speaker_id?: string | null;
+      turn_id?: string | null;
+      author?: string | null;
+    }
+  ): Promise<Annotation> {
+    const res = await fetch(`${API_BASE}/annotations/${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return handleResponse<Annotation>(res, 'Failed to save annotation');
+  },
+
+  async updateAnnotation(
+    sessionId: string,
+    annotationId: string,
+    update: Partial<{
+      start: number;
+      end: number;
+      text: string;
+      label: AnnotationLabel;
+      speaker_id: string | null;
+      turn_id: string | null;
+      author: string | null;
+    }>
+  ): Promise<Annotation> {
+    const res = await fetch(`${API_BASE}/annotations/${sessionId}/${annotationId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(update)
+    });
+    return handleResponse<Annotation>(res, 'Failed to update annotation');
+  },
+
+  /** Re-labels the turns an annotation covers with the speaker it names. */
+  async applyAnnotation(sessionId: string, annotationId: string): Promise<{ turns_updated: number }> {
+    const res = await fetch(`${API_BASE}/annotations/${sessionId}/${annotationId}/apply`, { method: 'POST' });
+    return handleResponse<{ turns_updated: number }>(res, 'Failed to apply annotation');
+  },
+
+  async deleteAnnotation(sessionId: string, annotationId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/annotations/${sessionId}/${annotationId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`Failed to delete annotation (${res.status})`);
   },
 
   // Translation

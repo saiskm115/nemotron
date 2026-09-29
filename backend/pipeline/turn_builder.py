@@ -1,9 +1,42 @@
 import uuid
-from typing import List, Tuple, Optional
-from ..models.turn import Turn, LanguageSegment
+from typing import List, Optional, Tuple
+
+from ..models.turn import Turn
 from ..models.speaker import Speaker
 from ..models.diarization import DiarizationSegment
 from .alignment import AlignedUnit, parse_language_segments
+
+DEFAULT_SPEAKER_COLORS = [
+    "#38bdf8", "#f43f5e", "#10b981", "#a855f7",
+    "#f59e0b", "#06b6d4", "#ec4899", "#84cc16",
+]
+
+# Neutral placeholders only. Invented human names imply a gender and an identity the
+# diarisation model has no way of knowing.
+DEFAULT_SPEAKER_LABELS = [
+    "Speaker 1", "Speaker 2", "Speaker 3", "Speaker 4",
+    "Speaker 5", "Speaker 6", "Speaker 7", "Speaker 8",
+]
+
+
+def infer_source_language(text: str, fallback: Optional[str] = None) -> str:
+    """
+    Language actually produced by the recogniser for this text.
+
+    Telugu/Hindi script presence wins over Latin, so a code-mixed line is reported
+    as the language the speaker was actually using.
+    """
+    has_te = any("\u0C00" <= c <= "\u0C7F" for c in text)
+    has_hi = any("\u0900" <= c <= "\u097F" for c in text)
+    has_latin = any(("a" <= c.lower() <= "z") for c in text)
+    if has_te:
+        return "te-IN"
+    if has_hi:
+        return "hi-IN"
+    if has_latin:
+        return "en-IN"
+    return fallback or "te-IN"
+
 
 class TurnBuilder:
     def __init__(self, max_turn_pause_sec: float = 1.0):
@@ -12,124 +45,144 @@ class TurnBuilder:
     def build_turns(
         self,
         aligned_units: List[AlignedUnit],
-        existing_speakers: List[Speaker] = None,
-        diarization_segments: Optional[List[DiarizationSegment]] = None
+        existing_speakers: Optional[List[Speaker]] = None,
+        diarization_segments: Optional[List[DiarizationSegment]] = None,
+        source_language: Optional[str] = None,
     ) -> Tuple[List[Turn], List[Speaker]]:
         """
-        Groups aligned units into conversational Turn objects and updates Speaker registry.
-        Snaps turn boundaries to Nemotron Diarization segments so that audio is completely covered.
+        Groups aligned units into conversational Turn objects and updates the Speaker registry.
+
+        Turn boundaries follow the diarisation segments so audio coverage is exact:
+        a turn spans the diarisation segments that the units it contains overlap,
+        and stops at the first segment a different speaker owns.
         """
         if not aligned_units:
             return [], existing_speakers or []
 
         turns: List[Turn] = []
-        current_speaker: str = aligned_units[0].speaker_id
         current_units: List[AlignedUnit] = []
 
-        def flush_turn(units: List[AlignedUnit]) -> None:
+        def flush(units: List[AlignedUnit]) -> None:
             if not units:
                 return
-            t_start = units[0].start
-            t_end = units[-1].end
-            combined_text = " ".join(u.text for u in units if not u.is_speech_only).strip()
+            speaker_id = units[0].speaker_id
+            text_units = [u for u in units if not u.is_speech_only]
+            combined_text = " ".join(u.text for u in text_units).strip()
+            is_speech_only_turn = not text_units
 
-            # Determine if this is a pure speech-only turn (no ASR text at all)
-            is_speech_only_turn = all(getattr(u, 'is_speech_only', False) for u in units)
+            t_start = min(u.start for u in units)
+            t_end = max(u.end for u in units)
 
-            # Snap turn boundary to encompass matching Nemotron diarization segment
+            # Extend the turn to fully cover the diarisation segments it touches,
+            # but never across a segment owned by another speaker.
             if diarization_segments:
                 for d in diarization_segments:
-                    if d.speaker_id == units[0].speaker_id:
-                        ov = max(0.0, min(t_end, d.end) - max(t_start, d.start))
-                        if ov > 0.15:
-                            t_start = min(t_start, d.start)
-                            t_end = max(t_end, d.end)
-            
-            # Detect overlap across units in this turn
+                    if d.speaker_id != speaker_id:
+                        continue
+                    if max(0.0, min(t_end, d.end) - max(t_start, d.start)) <= 0.15:
+                        continue
+                    blocked = any(
+                        other.speaker_id != speaker_id
+                        and max(0.0, min(d.end, other.end) - max(d.start, other.start)) > 0.05
+                        for other in diarization_segments
+                    )
+                    if blocked:
+                        continue
+                    t_start = min(t_start, d.start)
+                    t_end = max(t_end, d.end)
+
+            if t_end <= t_start:
+                t_end = t_start + 0.05
+
             any_overlap = any(u.is_overlap for u in units)
-            overlap_spks = sorted(list(set(
-                spk for u in units for spk in u.overlap_speakers if spk != units[0].speaker_id
-            )))
+            overlap_spks = sorted(
+                {
+                    spk
+                    for u in units
+                    for spk in u.overlap_speakers
+                    if spk != speaker_id
+                }
+            )
             all_final = all(u.is_final for u in units)
 
-            # Language segments (only for turns with actual text)
             lang_segs, _ = parse_language_segments(combined_text) if combined_text else ([], False)
+            confidences = [u.confidence for u in units if u.confidence is not None]
 
-            turn_id = f"turn_{uuid.uuid4().hex[:8]}"
             turns.append(
                 Turn(
-                    id=turn_id,
-                    speaker_id=units[0].speaker_id,
+                    id=f"turn_{uuid.uuid4().hex[:8]}",
+                    speaker_id=speaker_id,
                     start=round(t_start, 3),
                     end=round(t_end, 3),
                     text=combined_text,
-                    source_language="te-IN",
+                    source_language=infer_source_language(combined_text, source_language),
                     language_segments=lang_segs,
-                    confidence=0.94,
+                    confidence=round(sum(confidences) / len(confidences), 3) if confidences else None,
                     status="final" if all_final else "interim",
                     overlap=any_overlap,
                     overlap_speakers=overlap_spks,
                     source="model",
                     original_model_text=combined_text,
-                    original_model_speaker_id=units[0].speaker_id,
+                    original_model_speaker_id=speaker_id,
                     original_start=round(t_start, 3),
                     original_end=round(t_end, 3),
                     translation_status="not_requested",
-                    speech_only=is_speech_only_turn
+                    speech_only=is_speech_only_turn,
                 )
             )
 
+        current_speaker: Optional[str] = None
         for unit in aligned_units:
-            # Check speaker change or significant pause
             if current_units:
                 pause = unit.start - current_units[-1].end
                 if unit.speaker_id != current_speaker or pause > self.max_turn_pause_sec:
-                    flush_turn(current_units)
+                    flush(current_units)
                     current_units = []
-                    current_speaker = unit.speaker_id
-
             current_units.append(unit)
+            current_speaker = unit.speaker_id
 
         if current_units:
-            flush_turn(current_units)
+            flush(current_units)
 
         # Cross-turn overlap check (e.g. barge-ins between turns)
         for i, t1 in enumerate(turns):
             for j, t2 in enumerate(turns):
-                if i != j and t1.speaker_id != t2.speaker_id:
-                    if t1.start < t2.end and t2.start < t1.end:
-                        t1.overlap = True
-                        if t2.speaker_id not in t1.overlap_speakers:
-                            t1.overlap_speakers.append(t2.speaker_id)
+                if i == j or t1.speaker_id == t2.speaker_id:
+                    continue
+                if t1.start < t2.end and t2.start < t1.end:
+                    t1.overlap = True
+                    if t2.speaker_id not in t1.overlap_speakers:
+                        t1.overlap_speakers.append(t2.speaker_id)
 
-        # Update or construct Speaker list
         speakers_dict = {s.id: s for s in (existing_speakers or [])}
-        DEFAULT_COLORS = ["#38bdf8", "#f43f5e", "#10b981", "#a855f7", "#f59e0b", "#06b6d4", "#ec4899", "#84cc16"]
+        order = list(speakers_dict.keys())
+        for turn in turns:
+            if turn.speaker_id in speakers_dict:
+                continue
+            index = len(speakers_dict)
+            speakers_dict[turn.speaker_id] = Speaker(
+                id=turn.speaker_id,
+                display_name=(
+                    DEFAULT_SPEAKER_LABELS[index]
+                    if index < len(DEFAULT_SPEAKER_LABELS)
+                    else f"Speaker {index + 1}"
+                ),
+                color=DEFAULT_SPEAKER_COLORS[index % len(DEFAULT_SPEAKER_COLORS)],
+                total_speaking_time=0.0,
+                turn_count=0,
+                first_seen=turn.start,
+                last_seen=turn.end,
+                model_label=turn.speaker_id,
+            )
+            order.append(turn.speaker_id)
 
         for turn in turns:
-            spk_id = turn.speaker_id
-            turn_dur = max(0.0, turn.end - turn.start)
-            if spk_id not in speakers_dict:
-                color_idx = len(speakers_dict) % len(DEFAULT_COLORS)
-                disp_num = len(speakers_dict)
-                disp_names = ["Mohan", "Priya", "Ramesh", "Ananya", "Kavya", "Suresh", "Vikram", "Deepa"]
-                disp_name = disp_names[disp_num] if disp_num < len(disp_names) else f"Speaker {disp_num + 1}"
+            speaker = speakers_dict[turn.speaker_id]
+            speaker.total_speaking_time = round(
+                speaker.total_speaking_time + max(0.0, turn.end - turn.start), 3
+            )
+            speaker.turn_count += 1
+            speaker.first_seen = min(speaker.first_seen, turn.start)
+            speaker.last_seen = max(speaker.last_seen, turn.end)
 
-                speakers_dict[spk_id] = Speaker(
-                    id=spk_id,
-                    display_name=disp_name,
-                    color=DEFAULT_COLORS[color_idx],
-                    total_speaking_time=round(turn_dur, 3),
-                    turn_count=1,
-                    first_seen=turn.start,
-                    last_seen=turn.end,
-                    model_label=spk_id
-                )
-            else:
-                s = speakers_dict[spk_id]
-                s.total_speaking_time = round(s.total_speaking_time + turn_dur, 3)
-                s.turn_count += 1
-                s.first_seen = min(s.first_seen, turn.start)
-                s.last_seen = max(s.last_seen, turn.end)
-
-        return turns, list(speakers_dict.values())
+        return turns, [speakers_dict[key] for key in order]

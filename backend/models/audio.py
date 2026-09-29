@@ -7,7 +7,12 @@ class AudioMetadata(BaseModel):
     channels: int = 1
     sample_count: int = 0
     rms_db: float = 0.0
-    peaks: List[float] = Field(default_factory=list) # Downsampled waveform peaks for fast UI rendering
+    peak_db: float = 0.0
+    # Coarse waveform envelope for the default timeline zoom.
+    peaks: List[float] = Field(default_factory=list)
+    # Resolution pyramid (level 0 == `peaks`); the timeline picks the level that
+    # matches its zoom so long recordings stay accurate at every scale.
+    peak_levels: List[List[float]] = Field(default_factory=list)
 
 class AudioInput(BaseModel):
     file_path: Optional[str] = None

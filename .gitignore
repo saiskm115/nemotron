@@ -54,6 +54,7 @@ data/storage/*
 *.flac
 *.ogg
 *.aac
+!data/fixtures/*.wav
 
 # OS & IDE
 .DS_Store

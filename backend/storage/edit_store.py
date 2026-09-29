@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any
 from ..models.session import EditCommand
 
 class EditHistoryManager:

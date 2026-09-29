@@ -1,120 +1,175 @@
-import React from 'react';
-import { BarChart3, Zap, CheckCircle2, ShieldCheck, Trophy } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { api } from '../../services/api';
+import { toast } from '../../stores/toastStore';
+import { BarChart3, Play, Loader2, Info } from 'lucide-react';
+
+interface ReferenceFigures {
+  dataset?: string;
+  wer?: string;
+  cer?: string;
+  latin_preservation?: string;
+  real_time_factor?: string;
+  caveat?: string;
+}
+
+interface BenchmarkModel {
+  id: string;
+  label: string;
+  local: boolean;
+  recommended: boolean;
+  available: boolean;
+  notes: string;
+  reference: ReferenceFigures | null;
+}
+
+interface MeasuredResult {
+  model_id: string;
+  status: 'ok' | 'error' | 'unavailable';
+  error?: string;
+  wer?: number;
+  cer?: number;
+  latency_sec?: number;
+  real_time_factor?: number;
+  token_count?: number;
+  script?: string;
+  latin_word_ratio?: number;
+  transcript?: string;
+}
+
+const pct = (value?: number) => (value == null ? '—' : `${(value * 100).toFixed(1)}%`);
 
 export const BenchmarkScreen: React.FC = () => {
-  const benchmarkData = [
-    {
-      provider: 'AutoTinglishSub — Whisper Telugu Small (INT8 Quantized)',
-      badge: 'Primary Model',
-      wer: '7.9%',
-      cer: '2.8%',
-      latency: '180ms',
-      codeMixPreservation: '99.1% (Best Telugu + English)',
-      timestampAccuracy: 'Word-level (High Precision)',
-      properNounAccuracy: '97.4%',
-      recommended: true
-    },
-    {
-      provider: 'Vasista22 / Whisper Telugu Small (Fine-tuned)',
-      badge: 'Quantized',
-      wer: '9.1%',
-      cer: '3.4%',
-      latency: '210ms',
-      codeMixPreservation: '96.5%',
-      timestampAccuracy: 'Word-level',
-      properNounAccuracy: '94.0%',
-      recommended: false
-    },
-    {
-      provider: 'Sarvam Saaras V4',
-      badge: 'Cloud REST API',
-      wer: '8.4%',
-      cer: '3.1%',
-      latency: '240ms',
-      codeMixPreservation: '98.5%',
-      timestampAccuracy: 'Word-level',
-      properNounAccuracy: '96.2%',
-      recommended: false
-    },
-    {
-      provider: 'OpenAI Whisper Large V3',
-      badge: 'Cloud/Local',
-      wer: '15.6%',
-      cer: '6.2%',
-      latency: '780ms',
-      codeMixPreservation: '74.3% (Translates unwantedly)',
-      timestampAccuracy: 'Segment/Word',
-      properNounAccuracy: '79.1%',
-      recommended: false
-    },
-    {
-      provider: 'AI4Bharat IndicConformer',
-      badge: 'Open Weights',
-      wer: '13.2%',
-      cer: '5.4%',
-      latency: '450ms',
-      codeMixPreservation: '86.0%',
-      timestampAccuracy: 'Chunk-level',
-      properNounAccuracy: '84.0%',
-      recommended: false
+  const [models, setModels] = useState<BenchmarkModel[]>([]);
+  const [measured, setMeasured] = useState<MeasuredResult[] | null>(null);
+  const [duration, setDuration] = useState<number | null>(null);
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    api.getBenchmarkReference()
+      .then((data) => setModels(data.models))
+      .catch((e) => toast.error(e.message, 'Benchmark Unavailable'));
+  }, []);
+
+  const runMeasurement = async () => {
+    setRunning(true);
+    setMeasured(null);
+    try {
+      const data = await api.runBenchmark({});
+      const results: MeasuredResult[] = data.results ?? [];
+      setMeasured(results);
+      setDuration(data.audio_duration_sec);
+      toast.success(
+        `Scored ${results.filter((r: MeasuredResult) => r.status === 'ok').length} model(s) on ${data.audio_duration_sec}s of audio`,
+        'Benchmark Complete'
+      );
+    } catch (e: any) {
+      toast.error(e.message || 'Benchmark failed', 'Benchmark Failed');
+    } finally {
+      setRunning(false);
     }
-  ];
+  };
+
+  const measuredById = new Map((measured ?? []).map((r) => [r.model_id, r]));
 
   return (
     <div className="glass-panel p-5 flex flex-col gap-4">
-      {/* Header */}
       <div className="flex items-center justify-between border-b border-white/5 pb-3">
         <div className="flex items-center gap-2">
           <BarChart3 size={18} className="text-cyan-400" />
-          <h3 className="font-semibold text-sm text-slate-100">ASR Model Benchmark (Telugu + Code-Mixed Speech)</h3>
+          <h3 className="font-semibold text-sm text-slate-100">ASR Model Comparison (Telugu + English code-mixed)</h3>
         </div>
-        <span className="text-xs text-slate-400">Benchmark Suite v1.0</span>
+        <button
+          onClick={runMeasurement}
+          disabled={running}
+          className="btn btn-primary px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50"
+        >
+          {running ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+          {running ? 'Measuring…' : 'Measure on this machine'}
+        </button>
       </div>
 
-      <p className="text-xs text-slate-400">
-        Comparison of Automatic Speech Recognition (ASR) engines on representative Telugu-English bilingual recordings. Benchmarks evaluated on code-mixed preservation, word timestamp precision, and domain vocabulary.
-      </p>
+      <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-950/20 p-3">
+        <Info size={14} className="text-amber-400 mt-0.5 shrink-0" />
+        <p className="text-[11px] text-amber-200/90 leading-relaxed">
+          The <strong>Published</strong> column quotes each model's authors on their own test set — those
+          numbers come from different corpora and are <em>not</em> comparable across rows. The
+          <strong> Measured</strong> columns are computed by actually running each model on the same
+          audio and reference transcript on this machine. Trust the measured columns for comparisons.
+        </p>
+      </div>
 
-      {/* Comparison Table */}
       <div className="overflow-x-auto rounded-xl border border-white/5 bg-slate-950/60">
         <table className="w-full text-left text-xs border-collapse">
           <thead>
             <tr className="border-b border-white/10 bg-slate-900/80 text-slate-300 font-medium">
               <th className="p-3">Engine</th>
-              <th className="p-3">WER (Lower = Better)</th>
-              <th className="p-3">CER</th>
-              <th className="p-3">Avg Latency</th>
-              <th className="p-3">Code-Mix Preservation</th>
-              <th className="p-3">Timestamp Quality</th>
-              <th className="p-3">Proper Noun Acc.</th>
+              <th className="p-3">Measured WER ↓</th>
+              <th className="p-3">Measured CER ↓</th>
+              <th className="p-3">Measured RTF ↓</th>
+              <th className="p-3">Script</th>
+              <th className="p-3">Published WER / CER</th>
+              <th className="p-3">Evaluation set</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/5 font-mono text-[11px]">
-            {benchmarkData.map((row) => (
-              <tr
-                key={row.provider}
-                className={row.recommended ? 'bg-cyan-950/20 text-cyan-200' : 'text-slate-300 hover:bg-slate-900/40'}
-              >
-                <td className="p-3 font-sans font-semibold flex items-center gap-2">
-                  {row.recommended && <Trophy size={14} className="text-amber-400 shrink-0" />}
-                  <span>{row.provider}</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-normal ${
-                    row.recommended ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-slate-800 text-slate-400'
-                  }`}>
-                    {row.badge}
-                  </span>
-                </td>
-                <td className="p-3">{row.wer}</td>
-                <td className="p-3">{row.cer}</td>
-                <td className="p-3">{row.latency}</td>
-                <td className="p-3 font-sans">{row.codeMixPreservation}</td>
-                <td className="p-3 font-sans">{row.timestampAccuracy}</td>
-                <td className="p-3">{row.properNounAccuracy}</td>
-              </tr>
-            ))}
+          <tbody className="divide-y divide-white/5">
+            {models.map((model) => {
+              const result = measuredById.get(model.id);
+              const measuredOk = result?.status === 'ok';
+              return (
+                <tr
+                  key={model.id}
+                  className={`${model.recommended ? 'bg-cyan-950/20' : ''} text-slate-300 hover:bg-slate-900/40`}
+                >
+                  <td className="p-3 font-sans">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-slate-100">{model.label}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                        {model.local ? 'On-device' : 'Cloud'}
+                      </span>
+                      {model.recommended && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                          Recommended
+                        </span>
+                      )}
+                      {!model.available && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                          Unavailable
+                        </span>
+                      )}
+                    </div>
+                    {model.notes && <div className="text-[10px] text-slate-500 mt-1">{model.notes}</div>}
+                  </td>
+                  <td className="p-3 font-mono">{measuredOk ? pct(result.wer) : '—'}</td>
+                  <td className="p-3 font-mono">{measuredOk ? pct(result.cer) : '—'}</td>
+                  <td className="p-3 font-mono">
+                    {measuredOk ? `${result.real_time_factor}×` : '—'}
+                    {measuredOk && result.latency_sec != null && (
+                      <span className="text-slate-500"> ({result.latency_sec}s)</span>
+                    )}
+                  </td>
+                  <td className="p-3 font-mono">{measuredOk ? (result.script ?? '—') : '—'}</td>
+                  <td className="p-3 font-mono text-slate-400">
+                    {model.reference ? `${model.reference.wer} / ${model.reference.cer}` : '—'}
+                  </td>
+                  <td className="p-3 font-sans text-[11px] text-slate-400 max-w-[240px]">
+                    {model.reference?.dataset ?? '—'}
+                    {model.reference?.caveat && (
+                      <div className="text-[10px] text-slate-500 mt-0.5">{model.reference.caveat}</div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {measured && (
+        <p className="text-[11px] text-slate-400">
+          Measured on {duration}s of the two-speaker Telugu fixture at 16 kHz mono. Lower is better;
+          RTF is the fraction of real time the model needed (0.1× = ten times faster than playback).
+        </p>
+      )}
     </div>
   );
 };

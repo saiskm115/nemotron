@@ -1,11 +1,14 @@
 from datetime import datetime
 from typing import Optional, List, Literal, Any, Dict
 from pydantic import BaseModel, Field
+from .annotation import Annotation
 from .speaker import Speaker
 from .turn import Turn
 
 class SessionSettings(BaseModel):
     asr_mode: str = "codemix" # normal, codemix, verbatim
+    # Registry id of the transcription model used for this session.
+    asr_model: str = "svanita_0_6b"
     primary_language: str = "unknown" # te-IN, en-IN, unknown
     target_language: str = "en-IN"
     auto_translate: bool = False
@@ -32,6 +35,10 @@ class Session(BaseModel):
     target_language: Optional[str] = "en-IN"
     speakers: List[Speaker] = Field(default_factory=list)
     turns: List[Turn] = Field(default_factory=list)
+    # Manual labels a reviewer drew on the timeline. Survive re-processing because
+    # they are human judgements, not model output, so they are never discarded
+    # the way raw diarisation output is.
+    annotations: List[Annotation] = Field(default_factory=list)
     processing_status: Literal["uploading", "processing", "complete", "failed"] = "complete"
     error_message: Optional[str] = None
     mode: Literal["live", "offline"] = "offline"

@@ -12,7 +12,8 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize2,
-  Languages
+  Languages,
+  Tag
 } from 'lucide-react';
 
 export const EditorToolbar: React.FC = () => {
@@ -31,7 +32,10 @@ export const EditorToolbar: React.FC = () => {
     translitMode,
     setTranslitMode,
     displayMode,
-    setDisplayMode
+    setDisplayMode,
+    isAnnotating,
+    setIsAnnotating,
+    setSidebarTab
   } = useSessionStore();
 
   const turns = session?.turns || [];
@@ -182,6 +186,23 @@ export const EditorToolbar: React.FC = () => {
         >
           <Bookmark size={13} />
           <span>Marker</span>
+        </button>
+
+        {/* Manual labelling: puts the timeline into draw-a-label mode so a
+            reviewer can drag a region on the annotation lane under the waveform. */}
+        <button
+          onClick={() => {
+            setActiveTool('annotate');
+            setIsAnnotating(true);
+            setSidebarTab('annotations');
+            toast.info('Drag on the annotation lane under the waveform to label a region.', 'Annotate');
+          }}
+          className={`tool-btn ${isAnnotating ? 'active' : ''}`}
+          title="Draw a manual annotation on the timeline"
+          style={isAnnotating ? { borderColor: '#38bdf8', color: '#7dd3fc' } : undefined}
+        >
+          <Tag size={13} />
+          <span>Annotate</span>
         </button>
       </div>
 

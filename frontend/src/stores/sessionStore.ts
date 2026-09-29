@@ -1,7 +1,26 @@
 import { create } from 'zustand';
-import { Session, Turn, Speaker, SessionSettings } from '../types';
+import { Session, Turn, Speaker, SessionSettings, Annotation, AnnotationLabel } from '../types';
 import { api } from '../services/api';
 import { toast } from './toastStore';
+
+/** Mute/solo mix applied to the per-speaker gain nodes in the audio player. */
+export interface SpeakerGainState {
+  masterMuted: boolean;
+  soloActive: boolean;
+  muted: Record<string, boolean>;
+  solo: Record<string, boolean>;
+}
+
+/** What the timeline needs to record a region the reviewer drew. */
+export interface AnnotationInput {
+  start: number;
+  end: number;
+  text?: string;
+  label?: AnnotationLabel;
+  speaker_id?: string | null;
+  turn_id?: string | null;
+  author?: string | null;
+}
 
 interface SessionState {
   // Primary session state
@@ -21,9 +40,9 @@ interface SessionState {
   selectedSpeakerId: string | null;
   searchQuery: string;
   activeTab: 'transcript' | 'speakers' | 'vocabulary' | 'benchmark' | 'observability';
-  activeTool: 'select' | 'hand' | 'split' | 'merge' | 'speaker' | 'text' | 'marker';
+  activeTool: 'select' | 'hand' | 'split' | 'merge' | 'speaker' | 'text' | 'marker' | 'annotate';
   isSidebarOpen: boolean;
-  sidebarTab: 'speakers' | 'properties' | 'live';
+  sidebarTab: 'speakers' | 'annotations' | 'properties' | 'live';
   volume: number;
   isMuted: boolean;
   isLooping: boolean;
@@ -54,9 +73,9 @@ interface SessionState {
   setSelectedSpeakerId: (id: string | null) => void;
   setSearchQuery: (query: string) => void;
   setActiveTab: (tab: 'transcript' | 'speakers' | 'vocabulary' | 'benchmark' | 'observability') => void;
-  setActiveTool: (tool: 'select' | 'hand' | 'split' | 'merge' | 'speaker' | 'text' | 'marker') => void;
+  setActiveTool: (tool: 'select' | 'hand' | 'split' | 'merge' | 'speaker' | 'text' | 'marker' | 'annotate') => void;
   setIsSidebarOpen: (isOpen: boolean) => void;
-  setSidebarTab: (tab: 'speakers' | 'properties' | 'live') => void;
+  setSidebarTab: (tab: 'speakers' | 'annotations' | 'properties' | 'live') => void;
   setVolume: (vol: number) => void;
   setIsMuted: (muted: boolean) => void;
   setIsLooping: (looping: boolean) => void;
@@ -66,6 +85,22 @@ interface SessionState {
   setTranslitMode: (mode: 'script' | 'roman' | 'codemix') => void;
   setDisplayMode: (mode: 'original' | 'translation' | 'both') => void;
   setIsRecordingLive: (isRecording: boolean) => void;
+  /** Per-speaker mute/solo state, consumed by the audio player's gain graph. */
+  speakerGains: SpeakerGainState | null;
+  setSpeakerGains: (gains: SpeakerGainState | null) => void;
+
+  // ── Manual annotations (Section 41 of ui.md) ────────────────────────
+  annotations: Annotation[];
+  /** True while the timeline is in draw-a-label mode. */
+  isAnnotating: boolean;
+  setIsAnnotating: (on: boolean) => void;
+  /** The annotation the editor panel is focused on, if any. */
+  selectedAnnotationId: string | null;
+  setSelectedAnnotationId: (id: string | null) => void;
+  addAnnotation: (input: AnnotationInput) => Promise<Annotation | null>;
+  editAnnotation: (id: string, updates: Partial<Annotation>) => Promise<void>;
+  removeAnnotation: (id: string) => Promise<void>;
+  applyAnnotationToTurns: (id: string) => Promise<void>;
 
   // Session mutations
   retranscribingTurnId: string | null;
@@ -132,6 +167,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   displayMode: 'both' as const,
   isRecordingLive: false,
   retranscribingTurnId: null,
+  speakerGains: null,
+
+  annotations: [],
+  isAnnotating: false,
+  selectedAnnotationId: null,
+
+  setIsAnnotating: (isAnnotating) => set({ isAnnotating }),
+  setSelectedAnnotationId: (selectedAnnotationId) => set({ selectedAnnotationId }),
+
+  setSpeakerGains: (gains) => set({ speakerGains: gains }),
 
   setTimelineMode: (mode) => set({ timelineMode: mode }),
   toggleTimelineFocus: () => set(state => ({
@@ -152,14 +197,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setSession: (session) => set({
     session,
     duration: session.duration || 0,
-    currentTime: 0
+    currentTime: 0,
+    annotations: session.annotations ?? []
   }),
 
   loadSession: async (sessionId: string) => {
     set({ isLoading: true, error: null });
     try {
       const session = await api.getSession(sessionId);
-      set({ session, duration: session.duration || 0, isLoading: false });
+      set({
+        session,
+        duration: session.duration || 0,
+        annotations: session.annotations ?? [],
+        isLoading: false
+      });
     } catch (e: any) {
       const msg = e.message || 'Failed to load session';
       set({ error: msg, isLoading: false });
@@ -429,6 +480,89 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (e: any) {
       set({ error: e.message });
       toast.error(e.message || 'Failed to merge speakers', 'Merge Error');
+    }
+  },
+
+  // Annotation mutations
+  addAnnotation: async (input: AnnotationInput) => {
+    const sess = get().session;
+    if (!sess) {
+      toast.error('No active session to annotate.', 'Annotation');
+      return null;
+    }
+    try {
+      const created = await api.createAnnotation(sess.id, input);
+      set((state) => ({
+        annotations: [...state.annotations, created].sort((a, b) => a.start - b.start),
+        selectedAnnotationId: created.id,
+        saveStatus: 'saved'
+      }));
+      return created;
+    } catch (e: any) {
+      set({ error: e.message });
+      toast.error(e.message || 'Failed to save annotation', 'Annotation Error');
+      return null;
+    }
+  },
+
+  editAnnotation: async (id: string, updates: Partial<Annotation>) => {
+    const sess = get().session;
+    if (!sess) return;
+    const previous = get().annotations;
+    // Optimistic: typing in the editor must not lag behind the keystroke.
+    set({
+      annotations: previous
+        .map(a => a.id === id ? { ...a, ...updates } : a)
+        .sort((a, b) => a.start - b.start)
+    });
+    try {
+      const saved = await api.updateAnnotation(sess.id, id, updates);
+      set((state) => ({
+        annotations: state.annotations
+          .map(a => a.id === id ? saved : a)
+          .sort((a, b) => a.start - b.start)
+      }));
+    } catch (e: any) {
+      set({ annotations: previous, error: e.message });
+      toast.error(e.message || 'Failed to update annotation', 'Annotation Error');
+    }
+  },
+
+  removeAnnotation: async (id: string) => {
+    const sess = get().session;
+    if (!sess) return;
+    const previous = get().annotations;
+    set({
+      annotations: previous.filter(a => a.id !== id),
+      selectedAnnotationId: get().selectedAnnotationId === id ? null : get().selectedAnnotationId
+    });
+    try {
+      await api.deleteAnnotation(sess.id, id);
+    } catch (e: any) {
+      set({ annotations: previous, error: e.message });
+      toast.error(e.message || 'Failed to delete annotation', 'Annotation Error');
+    }
+  },
+
+  applyAnnotationToTurns: async (id: string) => {
+    const sess = get().session;
+    if (!sess) return;
+    try {
+      const result = await api.applyAnnotation(sess.id, id);
+      // The apply endpoint reassigns speakers, so re-read the session rather
+      // than patching turns locally and risking a stale speaker registry.
+      const refreshed = await api.getSession(sess.id);
+      set({
+        session: refreshed,
+        annotations: refreshed.annotations ?? get().annotations
+      });
+      toast.success(
+        `Re-assigned ${result.turns_updated} segment${result.turns_updated === 1 ? '' : 's'}`,
+        'Speaker Label Applied'
+      );
+    } catch (e: any) {
+      set({ error: e.message });
+      toast.error(e.message || 'Failed to apply annotation', 'Annotation Error');
     }
   },
 

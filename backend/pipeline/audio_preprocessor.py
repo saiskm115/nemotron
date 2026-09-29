@@ -1,8 +1,9 @@
 import io
-import math
 import logging
+import math
 from pathlib import Path
-from typing import Tuple, List, Optional, Union
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 import soundfile as sf
 import librosa
@@ -12,12 +13,26 @@ try:
 except ImportError:
     av = None
 
-from ..models.audio import AudioMetadata, AudioInput
+from ..models.audio import AudioInput, AudioMetadata
 
 logger = logging.getLogger(__name__)
 
+TARGET_SAMPLE_RATE = 16000
+
+# Peaks are stored as a small pyramid: level 0 is the coarse overview the timeline
+# draws first and each following level doubles the resolution. The waveform view
+# picks the level that matches its zoom, so zooming in reveals real detail instead
+# of magnifying an 800-point envelope.
+#
+# Levels are capped so the payload stays small regardless of recording length. A
+# production deployment that needs detail finer than ~2048 points across the visible
+# window should serve peaks from a range endpoint (start/duration/width) instead.
+PEAK_MIN_BUCKETS = 512
+PEAK_MAX_BUCKETS = 2048
+
+
 class AudioPreprocessor:
-    def __init__(self, target_sample_rate: int = 16000):
+    def __init__(self, target_sample_rate: int = TARGET_SAMPLE_RATE):
         self.target_sample_rate = target_sample_rate
 
     def _decode_with_pyav(self, source: Union[str, Path, bytes, bytearray]) -> Optional[np.ndarray]:
@@ -40,28 +55,25 @@ class AudioPreprocessor:
                 io_source = source
 
             container = av.open(io_source)
-            # Find the primary audio stream
             audio_stream = next((s for s in container.streams if s.type == "audio"), None)
             if audio_stream is None:
                 logger.warning("PyAV: No audio stream found in media container")
                 return None
 
-            # AudioResampler downmixes multichannel (stereo, dual-mic telephony) to mono
-            # and resamples to target_sample_rate (16000 Hz)
-            resampler = av.AudioResampler(
-                format="fltp",
-                layout="mono",
-                rate=self.target_sample_rate
-            )
+            # Resample in the source's own channel layout and average the channels
+            # explicitly. Asking PyAV for a mono output instead applies libswresample's
+            # default stereo->mono matrix of [0.707, 0.707], which preserves RMS: a
+            # dual-mic call recording with speech on one channel comes out 3 dB quiet
+            # and an out-of-phase stereo pair is summed, not cancelled.
+            resampler = av.AudioResampler(format="fltp", rate=self.target_sample_rate)
 
             chunks: List[np.ndarray] = []
             for frame in container.decode(audio_stream):
                 for resampled_frame in resampler.resample(frame):
-                    chunks.append(resampled_frame.to_ndarray()[0])
+                    chunks.append(_to_mono(resampled_frame))
 
-            # Flush resampler buffer
             for resampled_frame in resampler.resample(None):
-                chunks.append(resampled_frame.to_ndarray()[0])
+                chunks.append(_to_mono(resampled_frame))
 
             if not chunks:
                 return np.zeros(0, dtype=np.float32)
@@ -89,19 +101,17 @@ class AudioPreprocessor:
             try:
                 y, sr = sf.read(path_str)
             except Exception:
-                # If soundfile fails, try librosa
+                # If soundfile fails, try librosa (audioread/ffmpeg backend)
                 y, sr = librosa.load(path_str, sr=self.target_sample_rate, mono=True)
-                return y.astype(np.float32)
+                return np.asarray(y, dtype=np.float32)
 
-        # Average multichannel to mono if needed
         if y.ndim > 1:
             y = np.mean(y, axis=1)
 
-        # Resample if needed
         if sr != self.target_sample_rate:
             y = librosa.resample(y.astype(np.float32), orig_sr=sr, target_sr=self.target_sample_rate)
 
-        return y.astype(np.float32)
+        return np.asarray(y, dtype=np.float32)
 
     def load_audio(self, audio_input: AudioInput) -> np.ndarray:
         """
@@ -115,10 +125,8 @@ class AudioPreprocessor:
         else:
             raise ValueError("AudioInput must contain either valid file_path or raw_bytes")
 
-        # 1. Try PyAV first (covers AAC, M4A, AMR, 3GP, OPUS, WAV, MP3, etc.)
         y = self._decode_with_pyav(source)
 
-        # 2. If PyAV wasn't available or couldn't decode, use fallback
         if y is None:
             try:
                 y = self._decode_fallback(source)
@@ -130,7 +138,29 @@ class AudioPreprocessor:
                     f"Decoder error: {e}"
                 )
 
-        return y
+        return self._condition(y)
+
+    def _condition(self, y: np.ndarray) -> np.ndarray:
+        """
+        Sample conditioning applied to every signal before it reaches a model.
+
+        Removes DC offset, clips defensively and peak-normalises anything that would
+        otherwise clip. Speech recognition quality on telephone audio degrades badly
+        without this, and it is also what keeps the RMS dBFS reported to the UI honest.
+        """
+        y = np.asarray(y, dtype=np.float32)
+        if y.size == 0:
+            return y
+
+        dc = float(np.mean(y))
+        if abs(dc) > 1e-4:
+            y = y - dc
+
+        peak = float(np.max(np.abs(y)))
+        if peak > 1.0:
+            y = y / peak
+
+        return np.ascontiguousarray(y, dtype=np.float32)
 
     def process(self, audio_input: AudioInput, output_path: Optional[Path] = None) -> Tuple[np.ndarray, AudioMetadata, bytes]:
         """
@@ -139,27 +169,19 @@ class AudioPreprocessor:
         """
         y = self.load_audio(audio_input)
 
-        # Ensure float32 normalized in [-1.0, 1.0]
-        y = np.asarray(y, dtype=np.float32)
-        max_val = np.max(np.abs(y)) if len(y) > 0 else 0
-        if max_val > 1.0:
-            y = y / max_val
-
         sample_count = len(y)
         duration_sec = sample_count / float(self.target_sample_rate) if self.target_sample_rate > 0 else 0.0
 
-        # Compute RMS in dB
-        rms = np.sqrt(np.mean(y ** 2)) if sample_count > 0 else 0.0
+        rms = float(np.sqrt(np.mean(y.astype(np.float64) ** 2))) if sample_count else 0.0
         rms_db = 20 * math.log10(rms + 1e-9)
+        peak = float(np.max(np.abs(y))) if sample_count else 0.0
+        peak_db = 20 * math.log10(peak + 1e-9)
 
-        # Compute downsampled visual peaks for waveform UI (approx 800 buckets)
-        peaks = self._compute_peaks(y, num_peaks=800)
+        peak_levels = self._compute_peak_levels(y)
 
-        # Convert to 16-bit PCM (signed little-endian int16)
-        y_int16 = (y * 32767.0).astype(np.int16)
+        y_int16 = np.clip(y * 32767.0, -32768, 32767).astype(np.int16)
         pcm_bytes = y_int16.tobytes()
 
-        # If output_path provided, save standardized 16kHz mono WAV file
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             sf.write(str(output_path), y, self.target_sample_rate, subtype="PCM_16", format="WAV")
@@ -170,28 +192,64 @@ class AudioPreprocessor:
             channels=1,
             sample_count=sample_count,
             rms_db=round(rms_db, 2),
-            peaks=peaks
+            peaks=peak_levels[0],
+            peak_levels=peak_levels,
+            peak_db=round(peak_db, 2),
         )
 
         return y, metadata, pcm_bytes
 
-    def _compute_peaks(self, y: np.ndarray, num_peaks: int = 800) -> List[float]:
-        """Calculates normalized peak envelopes for responsive waveform UI rendering."""
+    def _compute_peak_levels(self, y: np.ndarray) -> List[List[float]]:
+        """
+        Builds a mip-mapped peak pyramid, coarsest first.
+
+        Each level doubles the bucket count up to ``PEAK_MAX_BUCKETS``, so the total
+        payload is bounded no matter how long the recording is.
+        """
         if len(y) == 0:
             return []
-        if len(y) <= num_peaks:
-            return [round(float(abs(v)), 3) for v in y]
-        
-        step = len(y) / float(num_peaks)
-        peaks = []
-        for i in range(num_peaks):
-            start = int(i * step)
-            end = int((i + 1) * step)
-            chunk = y[start:end]
-            if len(chunk) > 0:
-                peaks.append(round(float(np.max(np.abs(chunk))), 3))
-            else:
-                peaks.append(0.0)
-        return peaks
 
-preprocessor = AudioPreprocessor(target_sample_rate=16000)
+        magnitudes = np.abs(y.astype(np.float32))
+        buckets = min(PEAK_MIN_BUCKETS, max(1, len(magnitudes)))
+        levels: List[List[float]] = []
+
+        while True:
+            bucket_size = max(1, -(-len(magnitudes) // buckets))  # ceil division
+            levels.append(_downsample_peaks(magnitudes, bucket_size))
+            if buckets >= PEAK_MAX_BUCKETS or buckets >= len(magnitudes):
+                break
+            buckets = min(buckets * 2, PEAK_MAX_BUCKETS)
+
+        return levels
+
+
+def _to_mono(frame) -> np.ndarray:
+    """
+    One resampled frame as mono float32.
+
+    ``to_ndarray`` returns planar ``(channels, samples)`` for float formats and a
+    flat interleaved ``(1, channels * samples)`` for packed ones, so both shapes are
+    handled before averaging.
+    """
+    data = frame.to_ndarray()
+    if data.shape[0] == 1:
+        if frame.layout.nb_channels > 1:
+            data = data.reshape(-1, frame.layout.nb_channels).T
+        else:
+            return data[0].astype(np.float32, copy=False)
+    return data.mean(axis=0).astype(np.float32, copy=False)
+
+
+def _downsample_peaks(values: np.ndarray, bucket: int) -> List[float]:
+    if values.size == 0:
+        return []
+    if bucket <= 1:
+        return [round(float(v), 3) for v in values]
+    usable = (values.size // bucket) * bucket
+    if usable == 0:
+        return [round(float(values.max()), 3)]
+    folded = values[:usable].reshape(-1, bucket).max(axis=1)
+    return [round(float(v), 3) for v in folded]
+
+
+preprocessor = AudioPreprocessor(target_sample_rate=TARGET_SAMPLE_RATE)

@@ -1,4 +1,3 @@
-import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,9 +7,11 @@ from .api import (
     audio_router,
     transcription_router,
     speakers_router,
+    annotations_router,
     translations_router,
     exports_router,
-    live_router
+    live_router,
+    benchmark_router
 )
 
 @asynccontextmanager
@@ -40,17 +41,24 @@ app.include_router(sessions_router)
 app.include_router(audio_router)
 app.include_router(transcription_router)
 app.include_router(speakers_router)
+app.include_router(annotations_router)
 app.include_router(translations_router)
 app.include_router(exports_router)
 app.include_router(live_router)
+app.include_router(benchmark_router)
 
 @app.get("/api/health")
 async def health_check():
+    from .providers.asr.registry import DEFAULT_MODEL, list_asr_models, primary_model_id
+
+    models = list_asr_models()
     return {
         "status": "healthy",
         "service": "DiarizeStudio Backend",
-        "asr_provider": settings.asr_primary,
-        "diarization_provider": settings.diarization_primary,
+        "asr_provider": primary_model_id(),
+        "asr_provider_label": next((m["label"] for m in models if m["id"] == primary_model_id()), DEFAULT_MODEL),
+        "asr_models": [{"id": m["id"], "available": m["available"]} for m in models],
+        "diarization_provider": "nemotron_endpoint" if settings.nemotron_endpoint else "local_acoustic",
         "has_sarvam_key": bool(settings.sarvam_api_key),
         "has_nemotron_endpoint": bool(settings.nemotron_endpoint)
     }

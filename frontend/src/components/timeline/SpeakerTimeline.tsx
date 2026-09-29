@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { useSessionStore } from '../../stores/sessionStore';
 import { toast } from '../../stores/toastStore';
 import { Turn, Speaker } from '../../types';
+import { AnnotationTrack } from '../annotations/AnnotationTrack';
 import {
   Volume2, VolumeX, AlertTriangle, Bookmark,
   ZoomIn, ZoomOut, Maximize2, Minimize2, ChevronRight, ChevronDown,
@@ -16,13 +17,23 @@ const LANE_H = 46; // Minimum 40-48px per speaker lane (Section 12 of ui.md)
 const WAVEFORM_H = 64;
 const RULER_H = 26;
 const CAPTION_H = 34;
+const MIN_ZOOM = 4;
+const MAX_ZOOM = 1200;
+const SNAP_SEC = 0.12; // Boundary drag snap radius
 
 /* ─── Helper ──────────────────────────────────────────────────────────── */
 function formatTimecode(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  const cs = Math.floor((secs % 1) * 100);
-  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
+  const safe = Math.max(0, secs || 0);
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = Math.floor(safe % 60);
+  const cs = Math.floor((safe % 1) * 100);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  // Hour field only appears once the recording is long enough to need it, which is
+  // how professional editors keep short clips readable.
+  return h > 0
+    ? `${pad(h)}:${pad(m)}:${pad(s)}.${pad(cs)}`
+    : `${pad(m)}:${pad(s)}.${pad(cs)}`;
 }
 
 function formatSpeakingTime(secs: number): string {
@@ -53,7 +64,11 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
 
   const speakers = session?.speakers ?? [];
   const turns = session?.turns ?? [];
-  const peaks = (session as any)?.metadata?.audio?.peaks ?? [];
+  const audioMeta = (session?.metadata as any)?.audio;
+  // Prefer the resolution pyramid so zooming in reveals real detail instead of
+  // magnifying a fixed coarse envelope; fall back to the legacy single level.
+  const peakLevels: number[][] = audioMeta?.peak_levels?.length ? audioMeta.peak_levels : [audioMeta?.peaks ?? []];
+  const peaks = peakLevels[0] ?? [];
 
   const [mutedSpeakers, setMutedSpeakers] = useState<Record<string, boolean>>({});
   const [soloSpeakers, setSoloSpeakers] = useState<Record<string, boolean>>({});
@@ -61,6 +76,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
   const [collapsedSpeakers, setCollapsedSpeakers] = useState<Record<string, boolean>>({});
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [masterMuted, setMasterMuted] = useState(false);
+  const [viewport, setViewport] = useState({ start: 0, width: 900 });
 
   const [draggingBoundary, setDraggingBoundary] = useState<{
     turnId: string; boundary: 'start' | 'end'; initialX: number; initialTime: number; currentTime: number;
@@ -75,7 +91,38 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
   const totalWidth = Math.max(900, (duration || 1) * zoomLevel);
   const cursorX = duration > 0 ? (currentTime / duration) * totalWidth : 0;
 
-  // Close context menu on window click
+  /* ── Effective gain per speaker: solo overrides mute ────────────────── */
+  const soloActive = useMemo(() => Object.values(soloSpeakers).some(Boolean), [soloSpeakers]);
+
+  useEffect(() => {
+    useSessionStore.getState().setSpeakerGains?.({
+      masterMuted,
+      soloActive,
+      muted: mutedSpeakers,
+      solo: soloSpeakers,
+    });
+  }, [masterMuted, soloActive, mutedSpeakers, soloSpeakers]);
+
+  /* ── Visible viewport, tracked so the waveform canvas stays bounded ─── */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const read = () => {
+      const trackWidth = Math.max(1, el.clientWidth - LABEL_W);
+      const start = el.scrollLeft / zoomLevel;
+      setViewport({ start, width: trackWidth / zoomLevel });
+    };
+    read();
+    el.addEventListener('scroll', read, { passive: true });
+    const observer = new ResizeObserver(read);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener('scroll', read);
+      observer.disconnect();
+    };
+  }, [zoomLevel, totalWidth]);
+
+  /* ── Close context menu on window click ─────────────────────────────── */
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
     window.addEventListener('click', handleCloseMenu);
@@ -103,70 +150,92 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
     return ticks;
   }, [duration, zoomLevel]);
 
-  /* ── Waveform rendering ──────────────────────────────────────────────── */
+  /* ── Peak level selection ───────────────────────────────────────────── */
+  const activePeaks = useMemo(() => {
+    if (!peakLevels.length) return [];
+    // One bar per ~2 screen pixels keeps the drawing dense without over-sampling.
+    const wanted = Math.max(64, Math.round(totalWidth / 2));
+    let best = peakLevels[0];
+    for (const level of peakLevels) {
+      if (level.length <= wanted) best = level;
+    }
+    return best;
+  }, [peakLevels, totalWidth]);
+
+  /* ── Waveform rendering ─────────────────────────────────────────────── */
   useEffect(() => {
     const canvas = waveformCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = totalWidth;
-    const height = WAVEFORM_H;
-    canvas.width = width;
-    canvas.height = height;
+    const parent = canvas.parentElement;
+    const cssWidth = Math.max(1, parent?.clientWidth ?? totalWidth);
+    // Backing store is the size of the element, never the length of the recording.
+    // A canvas as wide as `totalWidth` overflows the browser's maximum dimension at
+    // high zoom and silently stops drawing.
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(WAVEFORM_H * dpr);
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${WAVEFORM_H}px`;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerY = height / 2;
+    const barH = height - 10 * dpr;
     ctx.clearRect(0, 0, width, height);
 
-    // Background gradient
-    const bg = ctx.createLinearGradient(0, 0, 0, height);
-    bg.addColorStop(0, 'rgba(56,189,248,0.04)');
-    bg.addColorStop(1, 'rgba(56,189,248,0)');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
+    // Time window currently on screen, mapped into canvas pixels.
+    const viewStart = viewport.start;
+    const viewSpan = viewport.width;
+    const scale = width / Math.max(0.001, viewSpan);
+    const xForTime = (t: number) => (t - viewStart) * scale;
 
-    // Speaker zone background
+    // Speaker zone shading, clipped to the visible window.
+    const colors = new Map(speakers.map((s) => [s.id, s.color]));
     turns.forEach((turn) => {
-      const spk = speakers.find((s) => s.id === turn.speaker_id);
-      const startX = (turn.start / (duration || 1)) * width;
-      const endX   = (turn.end   / (duration || 1)) * width;
-      const sw = Math.max(2, endX - startX);
-      ctx.fillStyle = spk?.color ? `${spk.color}18` : 'rgba(56,189,248,0.08)';
-      ctx.fillRect(startX, 0, sw, height);
-      ctx.fillStyle = spk?.color || '#38bdf8';
-      ctx.fillRect(startX, 0, sw, 2);
+      if (turn.end < viewStart || turn.start > viewStart + viewSpan) return;
+      const color = colors.get(turn.speaker_id) || '#38bdf8';
+      const startX = Math.max(0, xForTime(turn.start));
+      const endX = Math.min(width, xForTime(turn.end));
+      ctx.fillStyle = `${color}18`;
+      ctx.fillRect(startX, 0, Math.max(1, endX - startX), height);
+      ctx.fillStyle = color;
+      ctx.fillRect(startX, 0, Math.max(1, endX - startX), 2 * dpr);
     });
 
-    // Amplitude bars
-    const numBars = Math.max(400, Math.floor(width / 2.5));
-    const barW = width / numBars;
-    const centerY = height / 2;
-
-    for (let i = 0; i < numBars; i++) {
-      const peakIdx = peaks.length > 0 ? Math.floor((i / numBars) * peaks.length) : 0;
-      const raw = peaks.length > 0 ? peaks[peakIdx] : (Math.sin(i * 0.13) * 0.5 + Math.sin(i * 0.07) * 0.3) * 0.6 + 0.25;
-      const barH = Math.max(2, raw * (height - 10));
-      const x = i * barW;
-      const timeAtBar = (i / numBars) * (duration || 1);
-      const isPlayed = timeAtBar <= currentTime;
-
-      if (isPlayed) {
-        const g = ctx.createLinearGradient(0, centerY - barH / 2, 0, centerY + barH / 2);
-        g.addColorStop(0, '#38bdf8cc');
-        g.addColorStop(1, '#0284c7cc');
-        ctx.fillStyle = g;
-      } else {
-        ctx.fillStyle = 'rgba(51,65,85,0.85)';
+    // Amplitude bars from the resolution level that matches the zoom.
+    const data = activePeaks;
+    if (data.length > 0 && viewSpan > 0) {
+      const bars = Math.max(1, Math.floor(width / (2 * dpr)));
+      for (let i = 0; i < bars; i++) {
+        const t0 = viewStart + (i / bars) * viewSpan;
+        const t1 = viewStart + ((i + 1) / bars) * viewSpan;
+        const i0 = Math.floor((t0 / (duration || 1)) * data.length);
+        const i1 = Math.max(i0 + 1, Math.ceil((t1 / (duration || 1)) * data.length));
+        let peak = 0;
+        for (let k = i0; k < i1 && k < data.length; k++) peak = Math.max(peak, data[k]);
+        const h = Math.max(2 * dpr, peak * barH);
+        const x = (i / bars) * width;
+        ctx.fillStyle = t1 <= currentTime ? '#38bdf8cc' : 'rgba(51,65,85,0.85)';
+        ctx.fillRect(x, centerY - h / 2, Math.max(1, width / bars - 1), h);
       }
-      ctx.fillRect(x, centerY - barH / 2, Math.max(1, barW - 0.8), barH);
+    } else {
+      ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(width, centerY);
+      ctx.stroke();
     }
 
-    // Center baseline
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, centerY);
     ctx.lineTo(width, centerY);
     ctx.stroke();
-  }, [totalWidth, peaks, currentTime, duration, turns, speakers]);
+  }, [activePeaks, currentTime, duration, turns, speakers, viewport, totalWidth]);
 
   /* ── Mini-map rendering ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -207,13 +276,13 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
       const viewW = scrollRef.current.clientWidth - LABEL_W;
       const vpX = (scroll / totalWidth) * W;
       const vpW = Math.max(4, (viewW / totalWidth) * W);
-      ctx.strokeStyle = 'rgba(56,189,248,0.7)';
+      ctx.strokeStyle = 'rgba(56,189,248,0.9)';
       ctx.lineWidth = 1;
-      ctx.strokeRect(vpX, 0, vpW, H);
-      ctx.fillStyle = 'rgba(56,189,248,0.06)';
+      ctx.strokeRect(vpX + 0.5, 0.5, vpW, H - 1);
+      ctx.fillStyle = 'rgba(56,189,248,0.10)';
       ctx.fillRect(vpX, 0, vpW, H);
     }
-  }, [totalWidth, currentTime, duration, speakers, turns, zoomLevel]);
+  }, [totalWidth, currentTime, duration, speakers, turns, zoomLevel, viewport]);
 
   /* ── Seek helpers ────────────────────────────────────────────────────── */
   const seekToX = useCallback((clientX: number) => {
@@ -227,11 +296,58 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
 
   const handleTimelineMouseDown = (e: React.MouseEvent) => {
     const relX = e.clientX - (scrollRef.current?.getBoundingClientRect().left ?? 0);
-    if (relX > LABEL_W) {
+    if (relX > LABEL_W && e.button === 0) {
       isDraggingPlayhead.current = true;
       seekToX(e.clientX);
     }
   };
+
+  /* ── Snap a dragged boundary to a nearby segment edge ────────────────── */
+  const snapTime = useCallback((time: number, excludeTurnId: string, boundary: 'start' | 'end') => {
+    let best = time;
+    let bestDelta = SNAP_SEC;
+    const consider = (candidate: number) => {
+      const delta = Math.abs(candidate - time);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = candidate;
+      }
+    };
+    turns.forEach((turn) => {
+      if (turn.id === excludeTurnId) return;
+      consider(turn.start);
+      consider(turn.end);
+    });
+    return Math.max(0, Math.min(best, duration || 0));
+  }, [turns, duration]);
+
+  /* ── Wheel zoom, anchored on the pointer ────────────────────────────── */
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (duration <= 0) return;
+    // Plain wheel scrolls the timeline; ctrl/cmd + wheel zooms, as in every
+    // professional NLE. Horizontal wheels and trackpads pan.
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const el = scrollRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const anchorPx = e.clientX - rect.left - LABEL_W + el.scrollLeft;
+      const anchorTime = anchorPx / zoomLevel;
+      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel * factor));
+      if (next === zoomLevel) return;
+      setZoomLevel(next);
+      requestAnimationFrame(() => {
+        const current = scrollRef.current;
+        if (current) current.scrollLeft = Math.max(0, anchorTime * next - (e.clientX - rect.left - LABEL_W));
+      });
+      return;
+    }
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
+      e.preventDefault();
+      if (scrollRef.current) scrollRef.current.scrollLeft += e.deltaX || e.deltaY;
+    }
+  }, [duration, zoomLevel, setZoomLevel]);
 
   /* ── Global mouse handlers ───────────────────────────────────────────── */
   useEffect(() => {
@@ -241,16 +357,18 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
       } else if (draggingBoundary) {
         const deltaX = e.clientX - draggingBoundary.initialX;
         const deltaTime = zoomLevel > 0 ? deltaX / zoomLevel : (duration > 0 ? (deltaX / totalWidth) * duration : 0);
-        const rawTargetTime = Math.max(0, Math.min(draggingBoundary.initialTime + deltaTime, duration || 60));
-        const roundedTime = Math.round(rawTargetTime * 100) / 100;
+        const rawTargetTime = Math.max(0, Math.min(draggingBoundary.initialTime + deltaTime, duration || 0));
         const turn = turns.find(t => t.id === draggingBoundary.turnId);
         if (turn) {
-          // Check if speaker lane is locked
           if (lockedSpeakers[turn.speaker_id]) return;
-          if (draggingBoundary.boundary === 'start' && roundedTime < turn.end - 0.1) {
-            setDraggingBoundary(prev => prev ? { ...prev, currentTime: roundedTime } : null);
-          } else if (draggingBoundary.boundary === 'end' && roundedTime > turn.start + 0.1) {
-            setDraggingBoundary(prev => prev ? { ...prev, currentTime: roundedTime } : null);
+          const rounded = Math.round(rawTargetTime * 100) / 100;
+          if (draggingBoundary.boundary === 'start' && rounded < turn.end - 0.1) {
+            // Snap to neighbouring segment edges so edits meet cleanly.
+            const snapped = Math.min(snapTime(rounded, turn.id, 'start'), turn.end - 0.1);
+            setDraggingBoundary(prev => prev ? { ...prev, currentTime: snapped } : null);
+          } else if (draggingBoundary.boundary === 'end' && rounded > turn.start + 0.1) {
+            const snapped = Math.max(snapTime(rounded, turn.id, 'end'), turn.start + 0.1);
+            setDraggingBoundary(prev => prev ? { ...prev, currentTime: snapped } : null);
           }
         }
       }
@@ -279,7 +397,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingBoundary, duration, totalWidth, turns, seekToX, lockedSpeakers, retranscribeTurn]);
+  }, [draggingBoundary, duration, totalWidth, turns, seekToX, lockedSpeakers, retranscribeTurn, snapTime]);
 
   /* ── Minimap click to seek ───────────────────────────────────────────── */
   const handleMinimapClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -309,7 +427,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
     if (duration > 0 && scrollRef.current) {
       const viewW = scrollRef.current.clientWidth - LABEL_W - 24;
       if (viewW > 50) {
-        const fitZoom = Math.max(10, Math.min(300, Math.floor(viewW / duration)));
+        const fitZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor(viewW / duration)));
         setZoomLevel(fitZoom);
         if (scrollRef.current) scrollRef.current.scrollLeft = 0;
       }
@@ -323,7 +441,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
     if (targetTurn && duration > 0) {
       const viewW = scrollRef.current.clientWidth - LABEL_W - 24;
       const turnSpan = Math.max(0.5, targetTurn.end - targetTurn.start);
-      const selZoom = Math.max(15, Math.min(300, Math.floor((viewW * 0.70) / turnSpan)));
+      const selZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor((viewW * 0.70) / turnSpan)));
       setZoomLevel(selZoom);
       setTimeout(() => {
         if (scrollRef.current) {
@@ -339,6 +457,27 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
   const handleZoom100 = useCallback(() => {
     setZoomLevel(60);
   }, [setZoomLevel]);
+
+  /* ── Keyboard shortcuts for zoom ─────────────────────────────────────── */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        setZoomLevel(Math.min(MAX_ZOOM, Math.round(zoomLevel * 1.25)));
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        setZoomLevel(Math.max(MIN_ZOOM, Math.round(zoomLevel / 1.25)));
+      } else if (e.key === '0') {
+        e.preventDefault();
+        handleZoom100();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [zoomLevel, setZoomLevel, handleZoom100]);
 
   const handleFit = handleFitTimeline;
 
@@ -393,7 +532,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
 
           {/* Zoom Controls: -, 100%, +, Fit Timeline, Fit Selection */}
           <button
-            onClick={() => setZoomLevel(Math.max(10, zoomLevel - 15))}
+            onClick={() => setZoomLevel(Math.max(MIN_ZOOM, zoomLevel - 15))}
             className="tool-btn !px-1.5 !h-6 text-xs"
             title="Zoom Out (-)"
           >
@@ -402,14 +541,14 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
           <button
             onClick={handleZoom100}
             className="tool-btn !px-1.5 !h-6 text-[10px] font-mono"
-            title="Reset Zoom to 100% (60px/s)"
+            title="Reset Zoom to 100% (60px/s) — or press 0"
           >
             {zoomLevel}px
           </button>
           <button
-            onClick={() => setZoomLevel(Math.min(300, zoomLevel + 15))}
+            onClick={() => setZoomLevel(Math.min(MAX_ZOOM, zoomLevel + 15))}
             className="tool-btn !px-1.5 !h-6 text-xs"
-            title="Zoom In (+)"
+            title="Zoom In (+). Ctrl+wheel zooms at the pointer."
           >
             <ZoomIn size={11} />
           </button>
@@ -482,6 +621,7 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
       <div
         ref={scrollRef}
         onMouseDown={handleTimelineMouseDown}
+        onWheel={handleWheel}
         style={{
           overflowX: 'auto',
           overflowY: 'auto',
@@ -589,7 +729,11 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
                   Master Audio
                 </span>
                 <span style={{ fontSize: 9.5, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                  16 kHz · PCM Mono
+                  {audioMeta?.sample_rate ? `${(audioMeta.sample_rate / 1000).toFixed(0)} kHz` : '16 kHz'}
+                  {audioMeta?.channels ? ` · ${audioMeta.channels === 1 ? 'Mono' : `${audioMeta.channels}ch`}` : ' · Mono'}
+                  {typeof audioMeta?.peak_db === 'number'
+                    ? ` · ${audioMeta.peak_db.toFixed(1)} dBFS`
+                    : ''}
                 </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -956,7 +1100,10 @@ export const SpeakerTimeline: React.FC<SpeakerTimelineProps> = ({ onOpenUpload }
             </div>
           )}
 
-          {/* ── 5. Playhead needle (Spans all tracks) ────────────────────── */}
+          {/* ── 5. Manual annotation lane (Section 41) ───────────────────── */}
+          <AnnotationTrack totalWidth={totalWidth} duration={duration} />
+
+          {/* ── 6. Playhead needle (Spans all tracks) ────────────────────── */}
           <div
             style={{ position: 'absolute', left: `${cursorX + LABEL_W}px`, top: 0, bottom: 0, width: 2 }}
             className="playhead-line"

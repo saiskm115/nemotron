@@ -1,4 +1,3 @@
-import pytest
 from backend.storage.session_store import SessionStore
 from backend.models.session import SessionCreate
 from backend.models.speaker import Speaker, SpeakerUpdate
